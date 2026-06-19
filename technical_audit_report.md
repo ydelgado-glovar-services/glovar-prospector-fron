@@ -63,3 +63,26 @@ The background intelligence pipeline runs asynchronously utilizing Python `Threa
   `python scripts/main.py --payload_path <file> --user_id <uuid> --job_id <uuid>`
 - **Local Server:**
   `uvicorn app:app --host 0.0.0.0 --port 8000 --reload`
+
+
+
+---
+
+## 7. Auditoría 3.11.0 — Hallazgos y Correcciones
+
+### 7.1 Hallazgos críticos (corregidos)
+1. **Build roto por `.gitignore`:** la regla `lib/` de la plantilla Python (raíz) ignoraba `glovar-prospector-frontend/glovar-prospector-frontend/lib/`. Los archivos `types.ts`, `api.ts` y `utils.ts` **no estaban versionados**, por lo que el frontend no compilaba tras un clon limpio. _Fix:_ regla anclada a `/lib/` y `/lib64/`, y archivos `lib/*` restaurados.
+2. **"Guardar Consulta" inoperante:** el frontend llamaba a `PUT`/`DELETE /api/v1/queries/{id}` inexistentes, y el `POST` devolvía una lista (rompía `data.id` → `activeQueryId`). _Fix:_ endpoints añadidos y `POST` normalizado a objeto único; lógica de versionado completa.
+
+### 7.2 Hallazgos de seguridad (corregidos / mitigados)
+3. **`service_role` bypassa RLS:** el aislamiento multi-tenant depende del filtro `.eq("user_id", ...)`. Se reforzó en todos los endpoints nuevos + verificación de propiedad antes de mutar (anti-IDOR). RLS estricto definido también en la migración para accesos directos con anon key.
+4. **Webhook interno sin whitelist:** `PATCH /internal/update-job/{job_id}` aceptaba un dict arbitrario (mass-assignment). _Fix:_ whitelist `{status, progress_percentage, current_phase, error_message, processed_leads, total_leads}`. La telemetría de `BackgroundTasks → jobs_status` se preserva intacta.
+5. **CORS inválido:** `allow_origins=["*"]` + `allow_credentials=True`. _Fix:_ configurable vía `ALLOWED_ORIGINS` (credenciales solo con orígenes explícitos).
+
+### 7.3 Asincronía / rendimiento
+6. **Llamadas Supabase síncronas en endpoints async** bloquean el event loop. _Fix:_ los endpoints nuevos usan `run_in_threadpool`. _Recomendación pendiente:_ migrar los endpoints legados (`get_job_status`, `get_leads`, `trigger_prospecting_flow`) al mismo patrón.
+
+### 7.4 Hallazgos abiertos (pendientes, fuera del alcance de las 3 misiones)
+7. **Envío de correo desfasado:** `integrations-provider.tsx` llama `POST /api/v1/auth/google/send-email` con `{lead_id, subject, body}`, pero el backend expone `POST /api/v1/outreach/send-email` con esquema `{lead_id, target_email}`. _Acción recomendada:_ unificar ruta y contrato (el cuerpo del correo se toma de `mensaje_generado`, por lo que el frontend debería enviar `target_email`).
+8. **OAuth status simulado:** `/api/v1/auth/google/status` retorna `connected:true` fijo, lo que puede inducir a error si no hay integración real.
+9. **`POLL_BUDGET_MS = 9000_000`** (≈150 min) contradice el comentario "5 minutos" en `dashboard/page.tsx`.

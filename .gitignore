@@ -14,8 +14,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# NOTE: anchored to repo root so it only ignores Python build artifacts (/lib, /lib64)
+# and does NOT swallow the Next.js frontend source folder
+# glovar-prospector-frontend/glovar-prospector-frontend/lib/ (types.ts, api.ts, utils.ts).
+/lib/
+/lib64/
 parts/
 sdist/
 var/

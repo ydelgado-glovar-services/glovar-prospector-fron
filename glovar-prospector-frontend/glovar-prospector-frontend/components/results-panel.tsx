@@ -22,6 +22,8 @@ import {
   Send,
   RefreshCw,
   AlertCircle,
+  UserPlus,
+  CheckCheck,
 } from "lucide-react"
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend,
@@ -62,6 +64,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useToast } from "@/components/ui/use-toast"
 import { useIntegrations } from "@/components/integrations-provider"
+import { useCrm } from "@/components/crm-provider"
 import type { ProspectRequest, ProspectResult, SavedQuery, JobProgress } from "@/lib/types"
 
 interface ResultsPanelProps {
@@ -71,7 +74,7 @@ interface ResultsPanelProps {
   formData: ProspectRequest
   savedQueries: SavedQuery[]
   activeQueryId: string | null
-  onSaveQuery: (name: string, isOverwrite?: boolean, existingId?: string) => void
+  onSaveQuery: (name: string, isOverwrite?: boolean, existingId?: string, extra?: { tags?: string[]; result_job_id?: string | null; parent_query_id?: string | null }) => void
   onLoadQuery: (query: SavedQuery) => void
   onDeleteQuery: (id: string) => void
   /** True when the polling budget has been exhausted (soft-timeout) */
@@ -392,14 +395,21 @@ interface DashboardContentProps {
   formData: ProspectRequest
   savedQueries: SavedQuery[]
   activeQueryId: string | null
-  onSaveQuery: (name: string, isOverwrite?: boolean, existingId?: string) => void
+  onSaveQuery: (name: string, isOverwrite?: boolean, existingId?: string, extra?: { tags?: string[]; result_job_id?: string | null; parent_query_id?: string | null }) => void
 }
 
 function DashboardContent({ results, formData, savedQueries, activeQueryId, onSaveQuery }: DashboardContentProps) {
+  // ── Estado del flujo de guardado con versionado ──────────────────────────────
+  // step controla qué vista del modal se muestra:
+  //  - "create": no hay consulta activa → guardar como nueva (pide nombre)
+  //  - "choice": hay consulta activa con parámetros distintos → preguntar al usuario
+  //  - "overwrite": el usuario eligió sobreescribir (nueva versión con etiquetas/fecha)
+  //  - "new": el usuario eligió guardar como consulta totalmente nueva
+  type SaveStep = "create" | "choice" | "overwrite" | "new"
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
+  const [saveStep, setSaveStep] = useState<SaveStep>("create")
   const [queryName, setQueryName] = useState("")
-  const [conflictingQuery, setConflictingQuery] = useState<SavedQuery | null>(null)
-  const [isUpdateMode, setIsUpdateMode] = useState(false)
+  const [tagsInput, setTagsInput] = useState("")
 
   // Clasificación de leads en 3 estados: Calificado (con lead), Empresa Apta (sin lead), Descalificado
   const calificadosConLead = results.filter((r) => r.es_calificado && r.nombre_lead && r.nombre_lead !== "Contacto Pendiente")
@@ -419,58 +429,81 @@ function DashboardContent({ results, formData, savedQueries, activeQueryId, onSa
     { name: "Desconocidos", value: desconocidos.length, color: "#9ca3af" },
   ].filter((item) => item.value > 0) // Ocultar segmentos sin valores
 
+  // Consulta activa actualmente cargada (si existe).
+  const activeQuery = activeQueryId ? savedQueries.find((q) => q.id === activeQueryId) ?? null : null
+
+  /** Compara los parámetros del formulario con los de la consulta activa. */
+  const paramsChanged = useMemo(() => {
+    if (!activeQuery) return false
+    const normalize = (p: Partial<ProspectRequest> = {}) =>
+      JSON.stringify({
+        mi_empresa: p.mi_empresa ?? "",
+        sector: p.sector ?? "",
+        pais: p.pais ?? "",
+        tamano_empresa: p.tamano_empresa ?? "",
+        cargo_decision: p.cargo_decision ?? "",
+        dolor_cliente: p.dolor_cliente ?? "",
+        propuesta_valor: p.propuesta_valor ?? "",
+        limite_perfiles: p.limite_perfiles ?? null,
+        max_news_articles: p.max_news_articles ?? null,
+        triggers_compra: p.triggers_compra ?? "",
+        casos_exito: p.casos_exito ?? "",
+        keywords_industria: p.keywords_industria ?? "",
+        exclusion_list: [...(p.exclusion_list ?? [])].sort(),
+      })
+    return normalize(formData) !== normalize(activeQuery.search_params)
+  }, [activeQuery, formData])
+
+  // Etiqueta por defecto: fecha legible para distinguir la nueva versión de resultados.
+  const defaultVersionTag = `v${(activeQuery?.version ?? 1) + 1} · ${new Date().toLocaleDateString("es-ES", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  })}`
+
   const handleSaveClick = () => {
-    // [Safety Mechanism]: Modal State Safety
-    // Safely reads activeQueryId to switch between Update vs Create modes
-    if (activeQueryId) {
-      const activeQuery = savedQueries.find(q => q.id === activeQueryId)
-      if (activeQuery) {
-        setQueryName(activeQuery.query_name)
-        setIsUpdateMode(true)
-      } else {
-        setIsUpdateMode(false)
-        setQueryName("")
-      }
+    if (activeQuery) {
+      // Hay una consulta cargada. Si el usuario tocó parámetros, preguntamos;
+      // si no cambió nada, igual ofrecemos la decisión (puede querer re-anclar resultados).
+      setQueryName(activeQuery.query_name)
+      setTagsInput(defaultVersionTag)
+      setSaveStep("choice")
     } else {
-      setIsUpdateMode(false)
       setQueryName("")
+      setTagsInput("")
+      setSaveStep("create")
     }
     setSaveDialogOpen(true)
   }
 
-  const handleSave = () => {
-    const name = queryName.trim()
-    if (!name) return
-
-    if (isUpdateMode && activeQueryId) {
-      // Direct update of the active query
-      onSaveQuery(name, true, activeQueryId)
-      setQueryName("")
-      setSaveDialogOpen(false)
-      setIsUpdateMode(false)
-      return
-    }
-
-    const existing = savedQueries.find(
-      (q) => q.query_name.trim().toLowerCase() === name.toLowerCase()
-    )
-
-    if (existing) {
-      setConflictingQuery(existing)
-    } else {
-      onSaveQuery(name)
-      setQueryName("")
-      setSaveDialogOpen(false)
-    }
+  const closeDialog = () => {
+    setSaveDialogOpen(false)
+    setSaveStep("create")
+    setQueryName("")
+    setTagsInput("")
   }
 
-  const handleConfirmOverwrite = () => {
-    if (conflictingQuery) {
-      onSaveQuery(queryName.trim(), true, conflictingQuery.id)
-      setQueryName("")
-      setConflictingQuery(null)
-      setSaveDialogOpen(false)
-    }
+  /** Guarda como consulta nueva (POST). */
+  const handleSaveAsNew = () => {
+    const name = queryName.trim()
+    if (!name) return
+    const tags = tagsInput.split(",").map((t) => t.trim()).filter(Boolean)
+    onSaveQuery(name, false, undefined, {
+      tags,
+      // Si deriva de una consulta activa, la enlazamos como hija (linaje de versiones).
+      parent_query_id: activeQuery?.id ?? null,
+    })
+    closeDialog()
+  }
+
+  /** Sobreescribe la consulta activa creando una nueva versión con etiquetas/fecha. */
+  const handleOverwriteVersion = () => {
+    if (!activeQuery) return
+    const name = queryName.trim() || activeQuery.query_name
+    const tags = tagsInput.split(",").map((t) => t.trim()).filter(Boolean)
+    onSaveQuery(name, true, activeQuery.id, { tags })
+    closeDialog()
   }
 
   // Nombre sugerido basado en datos del formulario
@@ -489,56 +522,92 @@ function DashboardContent({ results, formData, savedQueries, activeQueryId, onSa
           </Button>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>Guardar consulta en historial</DialogTitle>
+              <DialogTitle>
+                {saveStep === "choice"
+                  ? "Esta consulta ya existe"
+                  : saveStep === "overwrite"
+                    ? "Sobreescribir como nueva versión"
+                    : "Guardar consulta en historial"}
+              </DialogTitle>
               <DialogDescription>
-                Asigna un nombre descriptivo para identificarla fácilmente después.
+                {saveStep === "choice"
+                  ? "Detectamos que estás guardando sobre una consulta cargada. Elige cómo quieres conservar los resultados."
+                  : saveStep === "overwrite"
+                    ? "Se incrementará la versión y se anclarán los resultados actuales a esta versión, con etiquetas/fecha para distinguirla."
+                    : "Asigna un nombre descriptivo para identificarla fácilmente después."}
               </DialogDescription>
             </DialogHeader>
-            {isUpdateMode ? (
+
+            {/* Paso 1: decisión sobreescribir vs nueva */}
+            {saveStep === "choice" ? (
               <div className="flex flex-col gap-3 py-2">
-                <div className="p-3 bg-blue-50 text-blue-900 border border-blue-200 rounded-md text-sm">
-                  Estás editando la consulta <strong>{queryName}</strong>.
+                <div className={`p-3 rounded-md text-sm border ${paramsChanged ? "bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/30 dark:text-amber-200 dark:border-amber-800/40" : "bg-muted text-muted-foreground border-border"}`}>
+                  {paramsChanged ? (
+                    <>Has ajustado parámetros respecto a <strong>{activeQuery?.query_name}</strong> (v{activeQuery?.version ?? 1}). ¿Cómo deseas guardarla?</>
+                  ) : (
+                    <>Consulta activa: <strong>{activeQuery?.query_name}</strong> (v{activeQuery?.version ?? 1}). Puedes re-anclar los resultados actuales o crear una copia.</>
+                  )}
                 </div>
-                <div className="flex flex-col gap-2 mt-2">
-                  <Label htmlFor="query-update-name" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Actualizar nombre (opcional)
+                <button
+                  type="button"
+                  onClick={() => { setQueryName(activeQuery?.query_name ?? ""); setTagsInput(defaultVersionTag); setSaveStep("overwrite") }}
+                  className="flex flex-col items-start gap-1 rounded-lg border border-border bg-card p-3 text-left transition-colors hover:border-primary hover:bg-primary/5"
+                >
+                  <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                    <RefreshCw className="h-4 w-4 text-primary" /> Sobreescribir (nueva versión)
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Mantiene la misma consulta, sube a la v{(activeQuery?.version ?? 1) + 1} y agrega etiquetas/fecha para distinguir estos resultados.
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setQueryName(""); setTagsInput(""); setSaveStep("new") }}
+                  className="flex flex-col items-start gap-1 rounded-lg border border-border bg-card p-3 text-left transition-colors hover:border-primary hover:bg-primary/5"
+                >
+                  <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                    <Save className="h-4 w-4 text-primary" /> Guardar como consulta nueva
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Crea una consulta independiente (enlazada como derivada) sin alterar la original.
+                  </span>
+                </button>
+                <DialogFooter className="mt-2">
+                  <Button variant="outline" size="sm" onClick={closeDialog}>Cancelar</Button>
+                </DialogFooter>
+              </div>
+            ) : saveStep === "overwrite" ? (
+              <div className="flex flex-col gap-3 py-2">
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="overwrite-name" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Nombre (opcional)
+                  </Label>
+                  <Input id="overwrite-name" value={queryName} onChange={(e) => setQueryName(e.target.value)} autoFocus />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="overwrite-tags" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Etiquetas de esta versión (separadas por coma)
                   </Label>
                   <Input
-                    id="query-update-name"
-                    value={queryName}
-                    onChange={(e) => setQueryName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleSave()
-                    }}
-                    autoFocus
+                    id="overwrite-tags"
+                    placeholder="Ej: Q3, ajuste-cargo, re-run"
+                    value={tagsInput}
+                    onChange={(e) => setTagsInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleOverwriteVersion() }}
                   />
+                  <span className="text-[10px] text-muted-foreground">Se añadirán a las etiquetas existentes para identificar la nueva versión de resultados.</span>
                 </div>
-                <DialogFooter className="mt-4">
-                  <Button variant="outline" size="sm" onClick={() => { setSaveDialogOpen(false); setQueryName(""); setIsUpdateMode(false); }}>
-                    Cancelar
-                  </Button>
-                  <Button variant="default" size="sm" onClick={handleSave} className="bg-blue-600 hover:bg-blue-700">
-                    Actualizar
+                <DialogFooter className="mt-2">
+                  <Button variant="outline" size="sm" onClick={() => setSaveStep("choice")}>Volver</Button>
+                  <Button size="sm" onClick={handleOverwriteVersion} className="gap-1.5 bg-amber-600 hover:bg-amber-700 text-white">
+                    <RefreshCw className="h-3.5 w-3.5" /> Crear versión v{(activeQuery?.version ?? 1) + 1}
                   </Button>
                 </DialogFooter>
               </div>
-            ) : conflictingQuery ? (
-              <div className="flex flex-col gap-3 py-2">
-                <div className="p-3 bg-amber-50 text-amber-900 border border-amber-200 rounded-md text-sm">
-                  Ya existe una consulta llamada <strong>{conflictingQuery.query_name}</strong>. ¿Deseas sobrescribirla?
-                </div>
-                <div className="flex justify-end gap-2 mt-2">
-                  <Button variant="outline" size="sm" onClick={() => setConflictingQuery(null)}>
-                    Volver y cambiar nombre
-                  </Button>
-                  <Button variant="default" size="sm" onClick={handleConfirmOverwrite} className="bg-amber-600 hover:bg-amber-700">
-                    Sobrescribir
-                  </Button>
-                </div>
-              </div>
             ) : (
-              <>
-                <div className="flex flex-col gap-3 py-2">
+              /* saveStep === "create" | "new" */
+              <div className="flex flex-col gap-3 py-2">
+                <div className="flex flex-col gap-2">
                   <Label htmlFor="query-name" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                     Nombre de la consulta
                   </Label>
@@ -547,22 +616,32 @@ function DashboardContent({ results, formData, savedQueries, activeQueryId, onSa
                     placeholder={suggestedName || "Ej: Campaña Real Estate Q3"}
                     value={queryName}
                     onChange={(e) => setQueryName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleSave()
-                    }}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSaveAsNew() }}
                     autoFocus
                   />
                 </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="new-tags" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Etiquetas (opcional)
+                  </Label>
+                  <Input
+                    id="new-tags"
+                    placeholder="Ej: prioridad-alta, LATAM"
+                    value={tagsInput}
+                    onChange={(e) => setTagsInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSaveAsNew() }}
+                  />
+                </div>
                 <DialogFooter>
-                  <Button variant="outline" size="sm" onClick={() => { setSaveDialogOpen(false); setQueryName(""); setConflictingQuery(null); }}>
-                    Cancelar
+                  <Button variant="outline" size="sm" onClick={saveStep === "new" ? () => setSaveStep("choice") : closeDialog}>
+                    {saveStep === "new" ? "Volver" : "Cancelar"}
                   </Button>
-                  <Button size="sm" onClick={handleSave} disabled={!queryName.trim()} className="gap-1.5">
+                  <Button size="sm" onClick={handleSaveAsNew} disabled={!queryName.trim()} className="gap-1.5">
                     <Save className="h-3.5 w-3.5" />
                     Guardar
                   </Button>
                 </DialogFooter>
-              </>
+              </div>
             )}
           </DialogContent>
         </Dialog>
@@ -780,9 +859,29 @@ function ReviewEmailDialog({
 function ResultsTable({ results }: { results: ProspectResult[] }) {
   const { toast } = useToast()
   const { isConnected, sendEmail } = useIntegrations()
+  const { isInCrm, addToCrm } = useCrm()
   const [sortOrder, setSortOrder] = useState<SortOrder>("relevancia")
   const [tableFilter, setTableFilter] = useState<TableFilter>("todos")
   const [sendingEmailId, setSendingEmailId] = useState<string | null>(null)
+  const [addingCrmId, setAddingCrmId] = useState<number | null>(null)
+
+  const handleAddToCrm = async (lead: ProspectResult) => {
+    if (lead.id == null) return
+    setAddingCrmId(lead.id)
+    try {
+      const ok = await addToCrm(lead)
+      if (ok) {
+        toast({
+          title: "Lead enviado al CRM",
+          description: `${lead.nombre_lead || "El lead"} se agregó a "Mis Leads / CRM".`,
+        })
+      } else {
+        toast({ variant: "destructive", title: "No se pudo enviar al CRM", description: "Intenta nuevamente." })
+      }
+    } finally {
+      setAddingCrmId(null)
+    }
+  }
 
   const handleSendEmail = async (lead: ProspectResult, subject: string, body: string) => {
     if (!lead.email) return
@@ -1149,6 +1248,26 @@ function ResultsTable({ results }: { results: ProspectResult[] }) {
                             })
                           }}
                         />
+                        {isInCrm(result.id) ? (
+                          <Badge variant="outline" className="h-7 w-full justify-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 border-emerald-500/40">
+                            <CheckCheck className="h-3.5 w-3.5" /> En CRM
+                          </Badge>
+                        ) : (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 w-full gap-1 text-[10px]"
+                            disabled={addingCrmId === result.id}
+                            onClick={() => handleAddToCrm(result)}
+                          >
+                            {addingCrmId === result.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <UserPlus className="h-3.5 w-3.5" />
+                            )}
+                            Enviar a CRM
+                          </Button>
+                        )}
                       </div>
                     ) : result.es_calificado && result.nombre_lead === "Contacto Pendiente" ? (
                       <Badge variant="outline" className="text-[11px] text-amber-600 dark:text-amber-400 border-amber-500/40 font-medium">

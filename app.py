@@ -7,15 +7,22 @@ import subprocess
 import base64
 from email.mime.text import MIMEText
 from typing import List, Optional
+from datetime import datetime, timezone
 import httpx
 from fastapi import FastAPI, BackgroundTasks, HTTPException, status, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _utc_now_iso() -> str:
+    """Timestamp ISO-8601 en UTC para columnas updated_at / last_run_at."""
+    return datetime.now(timezone.utc).isoformat()
 
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
@@ -31,14 +38,29 @@ def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
 
 app = FastAPI(
     title="Glovar Lead Prospector Enterprise API",
-    version="3.9.0",
+    version="3.11.0",
     dependencies=[Depends(verify_api_key)]
 )
 
+# ── CORS Hardening ────────────────────────────────────────────────────────────
+# La combinación allow_origins=["*"] + allow_credentials=True es inválida (los
+# navegadores la rechazan) e insegura. Se resuelve de forma configurable:
+#  - Si ALLOWED_ORIGINS está definido (CSV), se restringe a esos orígenes con
+#    credenciales habilitadas.
+#  - Si no, se permite "*" SIN credenciales (las peticiones legítimas llegan
+#    server-side desde el proxy de Next.js con x-api-key, no requieren cookies).
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+if _raw_origins:
+    _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+    _allow_credentials = True
+else:
+    _allowed_origins = ["*"]
+    _allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -153,23 +175,134 @@ async def get_job_status(job_id: str, x_user_id: str = Header(..., alias="x-user
 @app.get("/api/v1/queries")
 async def get_saved_queries(x_user_id: str = Header(...)):
     try:
-        response = supabase.table("saved_queries").select("*").eq("user_id", x_user_id).execute()
+        response = await run_in_threadpool(
+            lambda: supabase.table("saved_queries")
+            .select("*")
+            .eq("user_id", x_user_id)
+            .order("updated_at", desc=True)
+            .execute()
+        )
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cloud Supabase lookup failure: {str(e)}")
 
+
 @app.post("/api/v1/queries", status_code=status.HTTP_201_CREATED)
 async def create_saved_query(payload: dict, x_user_id: str = Header(...)):
+    """Crea una nueva consulta guardada (versión 1).
+
+    Devuelve un OBJETO único (no una lista) para que el frontend pueda leer
+    `data.id` y fijar el `activeQueryId`, habilitando el flujo de versionado.
+    """
     try:
+        now = _utc_now_iso()
+        # search_params puede venir embebido o ser el propio payload (legacy).
+        search_params = payload.get("search_params", payload)
+        # El proxy inyecta user_id dentro del body; lo descartamos del search_params
+        # para no contaminar los parámetros de búsqueda con metadatos de identidad.
+        if isinstance(search_params, dict):
+            search_params = {k: v for k, v in search_params.items() if k not in ("user_id", "query_name", "search_params", "result_job_id", "tags", "parent_query_id")}
+
         db_payload = {
             "user_id": x_user_id,
             "query_name": payload.get("query_name", f"Query Run {str(uuid.uuid4())[:8]}"),
-            "search_params": payload.get("search_params", payload)
+            "search_params": search_params,
+            "version": 1,
+            "tags": payload.get("tags", []),
+            "result_job_id": payload.get("result_job_id"),
+            "parent_query_id": payload.get("parent_query_id"),
+            "last_run_at": now if payload.get("result_job_id") else None,
+            "updated_at": now,
         }
-        response = supabase.table("saved_queries").insert(db_payload).execute()
-        return response.data
+        response = await run_in_threadpool(
+            lambda: supabase.table("saved_queries").insert(db_payload).execute()
+        )
+        # Normalización: retornar el primer (y único) registro como objeto.
+        return response.data[0] if response.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cloud Supabase insertion failure: {str(e)}")
+
+
+@app.put("/api/v1/queries/{query_id}")
+async def update_saved_query(query_id: str, payload: dict, x_user_id: str = Header(...)):
+    """Sobreescribe (nueva versión) una consulta existente.
+
+    Lógica de versionado: incrementa `version`, fusiona etiquetas, actualiza
+    `updated_at`/`last_run_at` y re-ancla `result_job_id` para que los resultados
+    de la ejecución vigente queden ligados a esta versión de la consulta.
+    El aislamiento multi-tenant se aplica SIEMPRE con `.eq("user_id", x_user_id)`.
+    """
+    try:
+        # 1. Verificar propiedad antes de mutar (defensa contra IDOR).
+        existing = await run_in_threadpool(
+            lambda: supabase.table("saved_queries")
+            .select("*")
+            .eq("id", query_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Saved query not found for this tenant.")
+
+        current = existing.data[0]
+        now = _utc_now_iso()
+        new_version = int(current.get("version") or 1) + 1
+
+        # Fusión idempotente de etiquetas (sin duplicados, preservando orden).
+        incoming_tags = payload.get("tags")
+        merged_tags = list(current.get("tags") or [])
+        if incoming_tags:
+            for t in incoming_tags:
+                if t and t not in merged_tags:
+                    merged_tags.append(t)
+
+        update_fields = {
+            "version": new_version,
+            "tags": merged_tags,
+            "updated_at": now,
+        }
+        if "query_name" in payload and payload["query_name"]:
+            update_fields["query_name"] = payload["query_name"]
+        if "search_params" in payload and isinstance(payload["search_params"], dict):
+            sp = {k: v for k, v in payload["search_params"].items() if k != "user_id"}
+            update_fields["search_params"] = sp
+        if payload.get("result_job_id"):
+            # Re-anclaje de resultados a la nueva versión de la consulta.
+            update_fields["result_job_id"] = payload["result_job_id"]
+            update_fields["last_run_at"] = now
+
+        response = await run_in_threadpool(
+            lambda: supabase.table("saved_queries")
+            .update(update_fields)
+            .eq("id", query_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        return response.data[0] if response.data else {}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Cloud Supabase update failure: {str(e)}")
+
+
+@app.delete("/api/v1/queries/{query_id}")
+async def delete_saved_query(query_id: str, x_user_id: str = Header(...)):
+    """Elimina una consulta guardada con verificación estricta de propiedad."""
+    try:
+        response = await run_in_threadpool(
+            lambda: supabase.table("saved_queries")
+            .delete()
+            .eq("id", query_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Saved query not found for this tenant.")
+        return {"status": "deleted", "id": query_id}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Cloud Supabase deletion failure: {str(e)}")
 
 @app.get("/api/v1/leads")
 async def get_leads(
@@ -198,8 +331,28 @@ async def get_google_auth_status(x_user_id: str = Header(..., description="Stric
 
 @app.patch("/api/v1/internal/update-job/{job_id}")
 async def update_job_metrics(job_id: str, data: dict):
+    """Webhook interno de telemetría invocado por scripts/main.py.
+
+    HARDENING: se aplica una whitelist estricta de columnas mutables para evitar
+    asignación masiva (mass-assignment) sobre la tabla jobs_status. El flujo de
+    telemetría de BackgroundTasks queda intacto: solo se filtran campos no permitidos.
+    """
+    ALLOWED_FIELDS = {
+        "status",
+        "progress_percentage",
+        "current_phase",
+        "error_message",
+        "processed_leads",
+        "total_leads",
+    }
+    sanitized = {k: v for k, v in (data or {}).items() if k in ALLOWED_FIELDS}
+    if not sanitized:
+        raise HTTPException(status_code=400, detail="No valid mutable fields supplied for job telemetry.")
+    sanitized["updated_at"] = _utc_now_iso()
     try:
-        response = supabase.table("jobs_status").update(data).eq("job_id", job_id).execute()
+        response = await run_in_threadpool(
+            lambda: supabase.table("jobs_status").update(sanitized).eq("job_id", job_id).execute()
+        )
         if not response.data:
             raise HTTPException(status_code=404, detail="Target job not found.")
         return {"status": "ok"}
@@ -317,3 +470,232 @@ async def send_cold_outreach_email(
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"Outreach transmission catastrophic failure: {str(e)}")
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MINI-CRM INTEGRADO  ─  Pipeline de leads calificados (tablas crm_leads / crm_lead_notes)
+#  SOP asociado: directivas/08_crm_pipeline_SOP.md
+#  Seguridad: aislamiento multi-tenant estricto vía .eq("user_id", x_user_id) en
+#  TODA operación (el service_role bypassea RLS, por lo que el filtro es obligatorio).
+# ══════════════════════════════════════════════════════════════════════════════
+
+CRM_VALID_STAGES = {"nuevo", "contactado", "en_conversacion", "propuesta", "ganado", "perdido"}
+CRM_VALID_PRIORITIES = {"baja", "media", "alta"}
+
+# Campos del snapshot del lead que se copian al CRM (desacoplados del lead origen).
+_CRM_SNAPSHOT_FIELDS = (
+    "nombre_lead", "empresa", "cargo", "email", "telefono",
+    "linkedin_url", "trigger_noticia", "mensaje_generado", "url_noticia",
+)
+
+
+@app.get("/api/v1/crm/leads")
+async def list_crm_leads(x_user_id: str = Header(...)):
+    """Lista las tarjetas del CRM del usuario con sus notas internas embebidas."""
+    try:
+        leads_resp = await run_in_threadpool(
+            lambda: supabase.table("crm_leads")
+            .select("*")
+            .eq("user_id", x_user_id)
+            .order("updated_at", desc=True)
+            .execute()
+        )
+        leads = leads_resp.data or []
+        lead_ids = [l["id"] for l in leads]
+
+        notes_by_lead: dict = {}
+        if lead_ids:
+            notes_resp = await run_in_threadpool(
+                lambda: supabase.table("crm_lead_notes")
+                .select("*")
+                .eq("user_id", x_user_id)
+                .in_("crm_lead_id", lead_ids)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            for note in (notes_resp.data or []):
+                notes_by_lead.setdefault(note["crm_lead_id"], []).append(note)
+
+        for lead in leads:
+            lead["notes"] = notes_by_lead.get(lead["id"], [])
+
+        return {"crm_leads": leads}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CRM lead retrieval failure: {str(e)}")
+
+
+@app.post("/api/v1/crm/leads", status_code=status.HTTP_201_CREATED)
+async def add_crm_lead(payload: dict, x_user_id: str = Header(...)):
+    """Envía un lead calificado al CRM.
+
+    Idempotente: si el lead origen (lead_id) ya está en el CRM del usuario, se
+    devuelve el registro existente en lugar de duplicarlo (upsert lógico).
+    """
+    try:
+        now = _utc_now_iso()
+        lead_id = payload.get("lead_id")
+
+        # Anti-duplicado cuando proviene de un lead real de la tabla `leads`.
+        if lead_id is not None:
+            existing = await run_in_threadpool(
+                lambda: supabase.table("crm_leads")
+                .select("*")
+                .eq("user_id", x_user_id)
+                .eq("lead_id", lead_id)
+                .execute()
+            )
+            if existing.data:
+                return existing.data[0]
+
+        stage = payload.get("stage", "nuevo")
+        if stage not in CRM_VALID_STAGES:
+            stage = "nuevo"
+        priority = payload.get("priority", "media")
+        if priority not in CRM_VALID_PRIORITIES:
+            priority = "media"
+
+        db_payload = {
+            "user_id": x_user_id,
+            "lead_id": lead_id,
+            "job_id": payload.get("job_id"),
+            "stage": stage,
+            "priority": priority,
+            "tags": payload.get("tags", []),
+            "created_at": now,
+            "updated_at": now,
+        }
+        for field in _CRM_SNAPSHOT_FIELDS:
+            db_payload[field] = payload.get(field)
+
+        response = await run_in_threadpool(
+            lambda: supabase.table("crm_leads").insert(db_payload).execute()
+        )
+        created = response.data[0] if response.data else {}
+        created["notes"] = []
+        return created
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CRM lead insertion failure: {str(e)}")
+
+
+@app.patch("/api/v1/crm/leads/{crm_lead_id}")
+async def update_crm_lead(crm_lead_id: str, payload: dict, x_user_id: str = Header(...)):
+    """Actualiza etapa (Kanban), prioridad y/o etiquetas de una tarjeta del CRM."""
+    update_fields: dict = {}
+
+    if "stage" in payload:
+        if payload["stage"] not in CRM_VALID_STAGES:
+            raise HTTPException(status_code=422, detail=f"Invalid stage. Allowed: {sorted(CRM_VALID_STAGES)}")
+        update_fields["stage"] = payload["stage"]
+
+    if "priority" in payload:
+        if payload["priority"] not in CRM_VALID_PRIORITIES:
+            raise HTTPException(status_code=422, detail=f"Invalid priority. Allowed: {sorted(CRM_VALID_PRIORITIES)}")
+        update_fields["priority"] = payload["priority"]
+
+    if "tags" in payload and isinstance(payload["tags"], list):
+        update_fields["tags"] = payload["tags"]
+
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No valid mutable CRM fields supplied.")
+
+    update_fields["updated_at"] = _utc_now_iso()
+
+    try:
+        response = await run_in_threadpool(
+            lambda: supabase.table("crm_leads")
+            .update(update_fields)
+            .eq("id", crm_lead_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(status_code=404, detail="CRM lead not found for this tenant.")
+        return response.data[0]
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"CRM lead update failure: {str(e)}")
+
+
+@app.delete("/api/v1/crm/leads/{crm_lead_id}")
+async def delete_crm_lead(crm_lead_id: str, x_user_id: str = Header(...)):
+    """Elimina una tarjeta del CRM (las notas asociadas caen por ON DELETE CASCADE)."""
+    try:
+        response = await run_in_threadpool(
+            lambda: supabase.table("crm_leads")
+            .delete()
+            .eq("id", crm_lead_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(status_code=404, detail="CRM lead not found for this tenant.")
+        return {"status": "deleted", "id": crm_lead_id}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"CRM lead deletion failure: {str(e)}")
+
+
+@app.post("/api/v1/crm/leads/{crm_lead_id}/notes", status_code=status.HTTP_201_CREATED)
+async def add_crm_note(crm_lead_id: str, payload: dict, x_user_id: str = Header(...)):
+    """Agrega una nota interna a una tarjeta del CRM, validando la propiedad del lead."""
+    body = (payload.get("body") or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Note body cannot be empty.")
+    try:
+        # Validar que la tarjeta pertenece al tenant antes de anexar la nota.
+        owner = await run_in_threadpool(
+            lambda: supabase.table("crm_leads")
+            .select("id")
+            .eq("id", crm_lead_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        if not owner.data:
+            raise HTTPException(status_code=404, detail="CRM lead not found for this tenant.")
+
+        now = _utc_now_iso()
+        note_payload = {
+            "crm_lead_id": crm_lead_id,
+            "user_id": x_user_id,
+            "body": body,
+            "created_at": now,
+        }
+        response = await run_in_threadpool(
+            lambda: supabase.table("crm_lead_notes").insert(note_payload).execute()
+        )
+        # Tocar updated_at del lead para que ascienda en el ordenamiento del board.
+        await run_in_threadpool(
+            lambda: supabase.table("crm_leads")
+            .update({"updated_at": now})
+            .eq("id", crm_lead_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        return response.data[0] if response.data else {}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"CRM note insertion failure: {str(e)}")
+
+
+@app.delete("/api/v1/crm/notes/{note_id}")
+async def delete_crm_note(note_id: str, x_user_id: str = Header(...)):
+    """Elimina una nota interna con verificación de propiedad."""
+    try:
+        response = await run_in_threadpool(
+            lambda: supabase.table("crm_lead_notes")
+            .delete()
+            .eq("id", note_id)
+            .eq("user_id", x_user_id)
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(status_code=404, detail="CRM note not found for this tenant.")
+        return {"status": "deleted", "id": note_id}
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"CRM note deletion failure: {str(e)}")
