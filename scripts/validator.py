@@ -2,6 +2,13 @@
 import argparse
 import os
 import sys
+
+# Asegurar que la raíz del workspace esté en sys.path para importar scripts.* tanto
+# cuando se ejecuta nativamente desde main.py como en modo standalone.
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
 import json
 import logging
 import time
@@ -11,6 +18,8 @@ from groq import Groq
 import groq
 from supabase import create_client, Client
 from dotenv import load_dotenv
+
+from scripts.scoring import compute_composite, account_qualifies, disqualified_scores
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +36,13 @@ except Exception:
 
 load_dotenv()
 
+# ── AUDITORÍA #8: Modelo configurable por entorno ───────────────────────────────
+# Permite afinar throughput/costo sin tocar código. Por defecto se mantiene el
+# modelo actual (Llama-4-Scout) para no alterar la calidad existente.
+GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+
 def get_next_groq_key(company_name: str = "") -> str:
     """Rotador determinista y sin estado (Stateless Hashing) de claves de API de Groq."""
     keys = []
@@ -38,11 +54,11 @@ def get_next_groq_key(company_name: str = "") -> str:
         standard_key = os.getenv("GROQ_API_KEY")
         if standard_key:
             keys.append(standard_key)
-            
+
     if not keys:
         logger.error("No Groq API keys found in environment variables.")
         raise ValueError("No Groq API keys found in environment variables.")
-        
+
     import hashlib
     # Si no se provee un nombre de empresa, se rota usando la marca de tiempo (minuto actual)
     if not company_name:
@@ -50,20 +66,21 @@ def get_next_groq_key(company_name: str = "") -> str:
         current_index = int(time.time() / 60)
     else:
         current_index = int(hashlib.md5(company_name.encode('utf-8')).hexdigest(), 16)
-        
+
     selected_key = keys[current_index % len(keys)]
     masked_key = selected_key[:7] + "..." + selected_key[-4:] if len(selected_key) > 10 else "..."
     logger.info(f"Rotating Groq API Key (Stateless): selected key index {current_index % len(keys)} ({masked_key})")
     return selected_key
 
 
-# ── Pydantic Models ──
-
 class CompanyAuditResult(BaseModel):
-    """Fase 1: Auditoría a nivel de empresa/cuenta."""
-    is_company_approved: bool = Field(description="True if the company has a valid recent growth trigger (2025/2026).")
-    company_justification: str = Field(description="Detailed Spanish justification of why the company is approved or rejected.")
-    trigger_summary: str = Field(description="Brief summary of the key growth trigger found, in Spanish.")
+    """Fase 1: Auditoría a nivel de empresa/cuenta (scoring ICP fit + intent)."""
+    is_company_approved: bool = Field(description="True if the account qualifies (driven by ICP fit, not only by news).")
+    fit_score: int = Field(default=0, description="0-100. How well the company matches the ICP: industry/sub-niche, size band, geography, and relevance to the client's pain.")
+    intent_score: int = Field(default=0, description="0-100. Strength and recency of the buying trigger found in the news. 0 if there is no real recent trigger.")
+    size_match: bool = Field(default=True, description="True if the company plausibly fits the requested employee-size band.")
+    company_justification: str = Field(description="Detailed Spanish justification of why the company qualifies or not, citing fit and (if any) the trigger.")
+    trigger_summary: str = Field(description="Brief summary of the key growth trigger found, in Spanish. If none, state it qualifies by ICP fit.")
 
 class BusinessValidationResult(BaseModel):
     """Fase 2: Validación a nivel de lead individual."""
@@ -88,8 +105,14 @@ def _serialize_news(news_data: list, full: bool = False) -> str | None:
     return json.dumps([{"title": n.get("title", "Hito de Crecimiento de la Empresa"), "url": n["url"]} for n in subset if n.get("url")])
 
 
-def _call_groq_with_retry(system_prompt: str, user_prompt: str, max_retries: int = 3, company_name: str = "") -> str | None:
-    """Llama a Groq con rotación de claves y reintentos exponenciales."""
+def _call_groq_with_retry(system_prompt: str, user_prompt: str, max_retries: int = 3, company_name: str = "", temperature: float = 0.1) -> str | None:
+    """Llama a Groq con rotación de claves y reintentos exponenciales.
+
+    AUDITORÍA #3 (Determinismo): se fija `temperature` (default 0.1) en TODAS las
+    llamadas de calificación (Fase 1 y Fase 2). Antes se omitía y el modelo usaba
+    el default alto (~1.0), provocando que la misma empresa se aprobara/rechazara
+    de forma distinta entre corridas. Con 0.1 los resultados son reproducibles.
+    """
     import random
     
     # Pacing Audit: jitter delay
@@ -105,12 +128,13 @@ def _call_groq_with_retry(system_prompt: str, user_prompt: str, max_retries: int
             api_key = get_next_groq_key(company_name)
             groq_client = Groq(api_key=api_key)
             chat_completion = groq_client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model=GROQ_MODEL_REASONING,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                temperature=temperature
             )
             response_text = chat_completion.choices[0].message.content
             break
@@ -130,8 +154,14 @@ def _call_groq_with_retry(system_prompt: str, user_prompt: str, max_retries: int
     return response_text
 
 
-def _run_company_audit(company_name: str, news_data: list, factual_context: str, form_context: dict) -> CompanyAuditResult | None:
-    """FASE 1: Auditoría a nivel de empresa — evalúa si la empresa tiene un hito de crecimiento válido."""
+def _run_company_audit(company_name: str, news_data: list, factual_context: str, form_context: dict, has_recent_trigger: bool = True) -> CompanyAuditResult | None:
+    """FASE 1: Auditoría de cuenta con scoring ICP (FIT-FIRST).
+
+    Cambio clave (Auditoría #1, #2, #5): ya NO se exige un trigger de noticias para
+    calificar. Se puntúa el FIT con el ICP (industria/sub-nicho, tamaño, geografía,
+    dolor) y el INTENT (fuerza/recencia del trigger). Una empresa de alto fit SIN
+    noticias recientes sigue calificando (nurture); los anti-perfiles se rechazan.
+    """
     
     # Extraer intención cognitiva del contexto enriquecido (Fase 0)
     extracted_intent = form_context.get("extracted_intent", {})
@@ -139,29 +169,41 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
     buying_trigger_context = extracted_intent.get("b2b_buying_trigger_context", "")
     anti_profile_constraints = extracted_intent.get("anti_profile_constraints", "")
     target_industry_core = extracted_intent.get("target_industry_core", form_context.get("sector", "su sector"))
-    
+    requested_size = form_context.get("tamano_empresa", "")
+    target_region = extracted_intent.get("target_market_region", form_context.get("pais", ""))
+
+    trigger_state = (
+        "There IS candidate recent news in the context below; evaluate its real strength."
+        if has_recent_trigger else
+        "There is NO substantial recent news mentioning the company. Set intent_score = 0 and "
+        "judge the account ONLY by its ICP FIT using your knowledge of the company's profile."
+    )
+
     system_prompt = (
-        "You are a highly analytical corporate strategic auditor. "
-        "Your task is to evaluate whether the TARGET COMPANY is a qualified prospect for the sending company's services. "
-        "CRITICAL ONTOLOGICAL CHECK (ANTI-PROFILES): "
-        f"Apply the following constraints strictly: '{anti_profile_constraints}'. "
-        "If the target company semantically matches these constraints (i.e. they are a direct competitor, like an operator logistics 3PL/4PL for a logistics client, or an insurance provider for an insurance client), "
-        "you MUST REJECT them immediately in Phase 1, explicitly stating in the justification that they belong to the client's Anti-Profile. "
-        "HYBRID DEDUCTIVE AUDIT: Use a two-tier evaluation for non-competitors. "
-        "TIER 1 (Approval by Trigger): If the news shows recent (2025/2026) global growth (funding, new products, "
-        "international expansion, facility expansions), APPROVE because it creates immediate operational stress and demand. "
-        "TIER 2 (Approval by Account Exception - Evergreen Targets): If there are NO recent news, BUT the company matches "
-        f"the profile of a massive top-tier enterprise within the '{target_industry_core}' sector (based on 500+ employee size), "
-        "you MUST APPROVE the account under the criterion of 'Volumen Operacional Continuo'. "
-        "Deduce that these massive companies operate continuously and their baseline demand for the client's services is constant. "
-        "REJECT ONLY if the company is an anti-profile, or if it is a small/irrelevant company with no recent growth triggers. "
-        "RIGOROUS PAIN EVALUATION: When approving, connect the trigger (or the continuous operational volume) to the following "
-        f"operational pain framework: '{pain_framework}'. "
-        "Output ALL text fields ('company_justification', 'trigger_summary') in professional, fluent Spanish."
+        "You are a rigorous B2B account-fit auditor producing a numeric ICP score. "
+        "You DO NOT require recent news to qualify an account; news only affects the INTENT score. "
+        "Score two independent dimensions from 0 to 100:\n"
+        "1) fit_score: how well the TARGET COMPANY matches the client's Ideal Customer Profile — "
+        f"industry/sub-niche ('{target_industry_core}'), requested employee size band ('{requested_size}'), "
+        f"geography ('{target_region}'), and relevance to the client's operational pain. "
+        "Penalize companies clearly outside the requested size band (set size_match=false and lower fit_score).\n"
+        "2) intent_score: strength and recency of a real buying trigger (funding, expansion, new products, "
+        "regulatory shifts, hiring) found in the provided news. If there is no real recent trigger, set it to 0.\n\n"
+        f"TRIGGER STATE: {trigger_state}\n\n"
+        "CRITICAL ANTI-PROFILE CHECK: "
+        f"Apply strictly: '{anti_profile_constraints}'. "
+        "If the target company semantically matches the anti-profile (a direct competitor of the sending company), "
+        "set fit_score below 20 and is_company_approved=false, stating it belongs to the client's Anti-Profile.\n\n"
+        "APPROVAL RULE (fit-first): set is_company_approved=true if the account is a genuine ICP match "
+        "(strong fit), EVEN IF intent_score is low. Reject only anti-profiles or low-fit/irrelevant companies. "
+        f"When approving, connect the reasoning to the client's pain framework: '{pain_framework}'. "
+        "Output 'company_justification' and 'trigger_summary' in professional, fluent Spanish. "
+        "If there is no recent trigger but the fit is strong, 'trigger_summary' must state that it qualifies by "
+        "ICP fit (sin trigger reciente)."
     )
     
     user_prompt = f"""
-    Evaluate the following company for growth potential as a prospect:
+    Evaluate the following company as a prospect and produce ICP scores:
     
     TARGET COMPANY: {company_name}
     
@@ -169,6 +211,9 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
     - Sending Company: '{form_context.get('mi_empresa', '')}'
     - Value Proposition: '{form_context.get('propuesta_valor', '')}'
     - Target Client's Main Pain: '{form_context.get('dolor_cliente', '')}'
+    - Requested Industry: '{target_industry_core}'
+    - Requested Company Size Band: '{requested_size}'
+    - Target Region: '{target_region}'
     
     COGNITIVE INTENT CONTEXT (Phase 0 Pre-flight Analysis):
     - What triggers a sale for us: '{buying_trigger_context}'
@@ -181,9 +226,12 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
     {factual_context}
     
     Return a JSON object with exactly these keys at the ROOT level:
-    - "is_company_approved": (boolean) True if the company has a valid recent (2025/2026) growth trigger.
-    - "company_justification": (string) In Spanish. Detailed explanation of why the company is approved or rejected. If approved, cite the specific growth trigger AND explain how it connects to the operational pain framework. If rejected, explain why the news is insufficient.
-    - "trigger_summary": (string) In Spanish. Brief 1-2 sentence summary of the key growth trigger found. If rejected, write "Sin trigger válido reciente."
+    - "is_company_approved": (boolean) True if the account is a genuine ICP match (fit-first; news not required).
+    - "fit_score": (integer 0-100) ICP fit as defined above.
+    - "intent_score": (integer 0-100) strength/recency of the real buying trigger; 0 if none.
+    - "size_match": (boolean) True if the company plausibly fits the requested employee-size band.
+    - "company_justification": (string, Spanish) Why it qualifies or not. Cite fit factors and, if any, the trigger and how it connects to the pain framework.
+    - "trigger_summary": (string, Spanish) 1-2 sentences on the key trigger; if none, say it qualifies by ICP fit (sin trigger reciente).
     """
     
     response_text = _call_groq_with_retry(system_prompt, user_prompt, company_name=company_name)
@@ -195,7 +243,14 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
         just = raw_json.get("company_justification")
         if isinstance(just, list):
             raw_json["company_justification"] = "\n".join(str(item) for item in just)
-        return CompanyAuditResult.model_validate(raw_json)
+        # Si no hay trigger reciente, forzar intent_score = 0 (consistencia determinista).
+        if not has_recent_trigger:
+            raw_json["intent_score"] = 0
+        audit = CompanyAuditResult.model_validate(raw_json)
+        # Recalcular la aprobación con la regla fit-first determinista (no confiar
+        # ciegamente en el booleano del LLM): aprueba por fit, rechaza anti-perfiles.
+        audit.is_company_approved = account_qualifies(audit.fit_score, has_recent_trigger)
+        return audit
     except Exception as e:
         logger.error(f"Error parsing company audit response: {e}. Raw: {response_text}")
         return None
@@ -213,9 +268,12 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
     supabase: Client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""))
 
     # ══════════════════════════════════════════════════════════════════════
-    # PRE-FILTRO: Verificar calidad de noticias antes de llamar al LLM
+    # PRE-FILTRO (NO bloqueante) — Auditoría #1: FIT-FIRST
+    # Antes esto descartaba la empresa por falta de noticias. Ahora SOLO determina
+    # si existe un trigger reciente real (intent). La calificación la decide el FIT
+    # en la Fase 1, de modo que un buen prospecto sin prensa NO se pierde.
     # ══════════════════════════════════════════════════════════════════════
-    
+
     longest_snippet = ""
     for news_item in news_data:
         snippet = news_item.get("snippet") or ""
@@ -224,36 +282,9 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
 
     longest_snippet_lower = longest_snippet.lower()
     has_error_strings = any(err in longest_snippet_lower for err in ["404", "429", "rate limit", "error", "not found", "access denied", "forbidden"])
+    news_substance_ok = len(longest_snippet) >= 150 and not has_error_strings
 
-    if len(longest_snippet) < 150 or has_error_strings:
-        logger.warning(f"Company {company_name} news substance check failed. Longest snippet length: {len(longest_snippet)}, has error strings: {has_error_strings}. Disqualifying company.")
-        serialized_news = _serialize_news(news_data)
-        
-        # Insertar fila de descalificación por falta de noticias sustanciales
-        try:
-            supabase.table("leads").insert({
-                "user_id": user_id,
-                "job_id": job_id,
-                "nombre_lead": "Contacto Pendiente",
-                "empresa": company_name,
-                "cargo": "Prospección Manual Pendiente",
-                "linkedin_url": "",
-                "email": None,
-                "url_noticia": serialized_news,
-                "es_calificado": False,
-                "razonamiento_filtro": "Descalificado: No se encontraron noticias sustanciales recientes (2025/2026) sobre la empresa. Los snippets recuperados están vacíos, contienen errores HTTP, o son demasiado cortos para determinar un hito de crecimiento válido.",
-                "trigger_noticia": "Falta de Noticias Sustanciales",
-                "mensaje_generado": None
-            }).execute()
-            logger.info(f"Appended news-substance-failure row for company: {company_name}")
-        except Exception as e:
-            logger.error(f"Error inserting news-substance-failure lead: {e}")
-        return
-
-    # ══════════════════════════════════════════════════════════════════════
-    # PRE-FILTRO: Verificar que las noticias mencionan a la empresa
-    # ══════════════════════════════════════════════════════════════════════
-    
+    # ¿Las noticias mencionan realmente a la empresa? (evita ruido genérico del sector)
     company_lower = company_name.lower()
     company_found_in_news = False
     for news_item in news_data:
@@ -262,29 +293,15 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
         if company_lower in title_text or company_lower in snippet_text:
             company_found_in_news = True
             break
-    
-    if not company_found_in_news:
-        logger.info(f"Trigger flagged as Generic Sector Noise for {company_name}. Short-circuiting.")
-        serialized_news = _serialize_news(news_data)
-        try:
-            supabase.table("leads").insert({
-                "user_id": user_id,
-                "job_id": job_id,
-                "nombre_lead": "Contacto Pendiente",
-                "empresa": company_name,
-                "cargo": "Prospección Manual Pendiente",
-                "linkedin_url": "",
-                "email": None,
-                "url_noticia": serialized_news,
-                "es_calificado": False,
-                "razonamiento_filtro": "Descalificado: Las noticias descubiertas son blogs genéricos de la industria y no mencionan directamente a la empresa objetivo.",
-                "trigger_noticia": "Ruido Genérico del Sector",
-                "mensaje_generado": None
-            }).execute()
-            logger.info(f"Appended generic noise row for company: {company_name}")
-        except Exception as e:
-            logger.error(f"Error inserting generic noise lead: {e}")
-        return
+
+    # Hay trigger reciente SOLO si las noticias son sustanciales Y mencionan a la empresa.
+    has_recent_trigger = news_substance_ok and company_found_in_news
+    if not has_recent_trigger:
+        logger.info(
+            f"No substantial recent trigger for '{company_name}' "
+            f"(substance_ok={news_substance_ok}, mentioned={company_found_in_news}). "
+            f"Proceeding FIT-FIRST: ICP fit will decide qualification (intent=0)."
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # FASE 1: AUDITORÍA A NIVEL DE EMPRESA (Company-Level Audit)
@@ -292,8 +309,8 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
     
     factual_context: str = get_tavily_factual_context(news_data)
     
-    logger.info(f"═══ FASE 1: Company-Level Audit for '{company_name}' ═══")
-    company_audit = _run_company_audit(company_name, news_data, factual_context, form_context)
+    logger.info(f"═══ FASE 1: Company-Level Audit for '{company_name}' (trigger_reciente={has_recent_trigger}) ═══")
+    company_audit = _run_company_audit(company_name, news_data, factual_context, form_context, has_recent_trigger=has_recent_trigger)
     
     if company_audit is None:
         logger.error(f"Company audit LLM call failed for {company_name}. Defaulting to disqualified.")
@@ -316,11 +333,21 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
         except Exception as e:
             logger.error(f"Error inserting LLM failure lead: {e}")
         return
-    
-    # ── Empresa RECHAZADA en Fase 1 → Descalificar toda la cuenta ──
+
+    # Scoring de cuenta (Fase 1): fit + intent → se reutiliza en todos los inserts.
+    account_fit = company_audit.fit_score
+    account_intent = company_audit.intent_score
+    account_reasons = {
+        "trigger_summary": company_audit.trigger_summary,
+        "size_match": company_audit.size_match,
+        "has_recent_trigger": has_recent_trigger,
+    }
+
+    # ── Empresa RECHAZADA en Fase 1 (bajo fit / anti-perfil) → Descalificar cuenta ──
     if not company_audit.is_company_approved:
-        logger.info(f"Company '{company_name}' REJECTED in Phase 1. Reason: {company_audit.trigger_summary}")
+        logger.info(f"Company '{company_name}' REJECTED in Phase 1 (fit={account_fit}). Reason: {company_audit.trigger_summary}")
         serialized_news = _serialize_news(news_data)
+        account_scores = disqualified_scores(account_fit, account_intent, reasons=account_reasons)
         try:
             supabase.table("leads").insert({
                 "user_id": user_id,
@@ -334,7 +361,8 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
                 "es_calificado": False,
                 "razonamiento_filtro": company_audit.company_justification,
                 "trigger_noticia": company_audit.trigger_summary,
-                "mensaje_generado": None
+                "mensaje_generado": None,
+                **account_scores,
             }).execute()
             logger.info(f"Appended Phase 1 rejection row for company: {company_name}")
         except Exception as e:
@@ -370,7 +398,8 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
                 "es_calificado": True,  # ← EMPRESA APTA
                 "razonamiento_filtro": fallback_reasoning,
                 "trigger_noticia": company_audit.trigger_summary,
-                "mensaje_generado": None
+                "mensaje_generado": None,
+                **compute_composite(account_fit, account_intent, role_fit=None, reasons=account_reasons),
             }).execute()
             logger.info(f"Appended EMPRESA APTA (sin lead) row for company: {company_name}")
         except Exception as e:
@@ -418,13 +447,21 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
             "title": lead.get("title", "")
         })
 
+    trigger_directive = (
+        "The company has a REAL recent buying trigger. Start the email directly with that news trigger."
+        if has_recent_trigger else
+        "There is NO recent news trigger; the account qualifies by ICP FIT. Do NOT invent or fabricate any news. "
+        "Open the email with the prospect's operational context/pain and the value proposition instead of a fake news hito."
+    )
+
     prompt_context = f"""
-    Analyze the recent pre-approved growth trigger for the target company: {company_name}.
+    Analyze the pre-approved target company: {company_name}.
     
-    COMPANY AUDIT RESULT (Phase 1 — ALREADY APPROVED):
-    The company has been pre-approved with the following growth trigger:
+    COMPANY AUDIT RESULT (Phase 1 — ALREADY APPROVED, fit-first):
     {company_audit.company_justification}
     Trigger Summary: {company_audit.trigger_summary}
+    Account ICP fit_score: {company_audit.fit_score}/100 · intent_score: {company_audit.intent_score}/100
+    TRIGGER DIRECTIVE: {trigger_directive}
 
     Context from our commercial positioning criteria:
     - Sending Company: '{form_context['mi_empresa']}'
@@ -440,18 +477,21 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
     {json.dumps(leads_batch, indent=2)}
 
     YOUR TASK IN PHASE 2 IS:
-    Evaluate each candidate's role to see if it is relevant to the sending company's value proposition.
+    Evaluate each candidate's role relevance to the sending company's value proposition.
     The role should be a decision-maker or influencer related to: {form_context.get('cargo_decision', '')}.
-    If the role is relevant:
+    For EACH candidate, also assign a "role_fit_score" (integer 0-100) reflecting how well their seniority and
+    decision power match the target role (a perfect C-level/VP decision-maker ≈ 90-100; tangential influencer ≈ 50-70;
+    irrelevant ≈ 0-30).
+    If the role is relevant (role_fit_score >= 50):
     1. Set is_approved to true.
-    2. Write a highly persuasive cold email (maximum 150 words) structured in 4 parts, starting directly with the news trigger, addressed strictly to the candidate's first_name.
-    3. Generate a subject line: 'Hito/Noticia de Crecimiento de [Empresa]: [Acción Preventiva de mitigación del dolor]'.
+    2. Write a highly persuasive cold email (maximum 150 words) structured in 4 parts, following the TRIGGER DIRECTIVE above, addressed strictly to the candidate's first_name.
+    3. Generate a subject line tailored to the buying match (use the growth hito if it exists; otherwise focus on the operational pain/value).
     4. Write a Spanish justification structured strictly in three numbered points:
-       1. EL HECHO NOTICIOSO DETONANTE: Citation of the exact news hito, funding amount, expansion, or clinical trial start.
-       2. EL IMPACTO OPERATIVO DEDUCTIVO: In-depth explanation of how this growth milestone will stress their operations, connecting it DIRECTLY to the Rigorous Pain Framework: '{form_context.get('extracted_intent', {}).get('rigorous_pain_framework', form_context['dolor_cliente'])}'.
-       3. ENCAJE DEL ROL: Direct relation of the lead's role ('title') with the preventive responsibility to mitigate this operational pain.
+       1. EL DETONANTE: the news hito if it exists; otherwise the ICP fit reason (operational context).
+       2. EL IMPACTO OPERATIVO DEDUCTIVO: how this stresses their operations, connecting DIRECTLY to the Rigorous Pain Framework: '{form_context.get('extracted_intent', {}).get('rigorous_pain_framework', form_context['dolor_cliente'])}'.
+       3. ENCAJE DEL ROL: relation of the lead's role ('title') with the responsibility to mitigate this operational pain.
     
-    If the role is completely irrelevant (e.g., HR, marketing, design, or unrelated department), set is_approved to false.
+    If the role is irrelevant (e.g., HR, marketing, design, unrelated department), set is_approved to false and role_fit_score below 40.
 
     LANGUAGE OF THE OUTPUT:
     All justifications, subject lines, and email bodies MUST be written entirely in professional, fluent, and natural Spanish (Español).
@@ -463,6 +503,7 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
         {{
           "linkedin_url": "linkedin_url_of_the_candidate",
           "is_approved": true,
+          "role_fit_score": 85,
           "justification": "1. ...\\n2. ...\\n3. ...",
           "subject_line": "...",
           "email_body": "..."
@@ -535,12 +576,14 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
         reasoning = "Descalificado: El cargo del lead no se alinea con los roles decisores requeridos."
         subject_line = None
         email_body = None
+        role_fit = 0
 
         if lead_eval:
             is_approved = lead_eval.get("is_approved", False)
             reasoning = lead_eval.get("justification") or "Descalificado por rol."
             subject_line = lead_eval.get("subject_line")
             email_body = lead_eval.get("email_body")
+            role_fit = lead_eval.get("role_fit_score", 70 if is_approved else 0)
         else:
             logger.warning(f"No batch LLM evaluation found for lead: {full_name}. Defaulting to rejected.")
 
@@ -550,6 +593,16 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
 
             serialized_news = _serialize_news(news_data, full=is_approved)
 
+            # Scoring compuesto del lead (fit + intent de cuenta + role_fit del contacto).
+            # Solo se puntúan los leads aprobados; los rechazados quedan con match_score=0 (default).
+            if is_approved:
+                lead_scores = compute_composite(
+                    account_fit, account_intent, role_fit=role_fit,
+                    reasons={**account_reasons, "role_title": title},
+                )
+            else:
+                lead_scores = {}
+
             supabase.table("leads").insert({
                 "user_id": user_id,
                 "job_id": job_id,
@@ -558,17 +611,20 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
                 "cargo": title,
                 "linkedin_url": linkedin_url,
                 "email": lead.get("email"),
+                "email_source": lead.get("email_source"),
+                "email_verified": lead.get("email_verified", False),
                 "url_noticia": serialized_news,
                 "es_calificado": is_approved,
                 "razonamiento_filtro": reasoning,
                 "trigger_noticia": subject_line if is_approved else None,
-                "mensaje_generado": email_body if is_approved else None
+                "mensaje_generado": email_body if is_approved else None,
+                **lead_scores,
             }).execute()
 
             if is_approved:
                 any_lead_approved = True
             
-            logger.info(f"Appended row for lead: {full_name} (approved={is_approved})")
+            logger.info(f"Appended row for lead: {full_name} (approved={is_approved}, match={lead_scores.get('match_score', 0)})")
         except Exception as e:
             logger.error(f"Error executing processing step and writing to cloud: {e}")
 
@@ -594,7 +650,8 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
                 "es_calificado": True,  # ← EMPRESA APTA
                 "razonamiento_filtro": fallback_reasoning,
                 "trigger_noticia": company_audit.trigger_summary,
-                "mensaje_generado": None
+                "mensaje_generado": None,
+                **compute_composite(account_fit, account_intent, role_fit=None, reasons=account_reasons),
             }).execute()
             logger.info(f"Appended EMPRESA APTA (all leads rejected by role) row for company: {company_name}")
         except Exception as e:

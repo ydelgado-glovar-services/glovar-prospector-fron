@@ -1,0 +1,134 @@
+# scripts/scoring.py
+"""
+Motor de scoring ICP (Fit + Intent) — Glovar Prospector.
+
+Fundamento (validado contra el mercado B2B 2026):
+  - FIT = qué tan bien encaja la cuenta con el Ideal Customer Profile
+    (industria/sub-nicho, tamaño, geografía, alineación con el dolor). Es estable.
+  - INTENT = fuerza y recencia de la señal de compra (trigger de noticias). Es volátil.
+  - El score final fusiona ambos: "Fit sin señales no avanza; señales sin fit es ruido".
+    El FIT domina (califica), el INTENT acelera/prioriza.
+
+Patrón de ruteo implementado en el validador:
+  - Alto Fit + Alto Intent  → Tier A (listo para vender, máxima prioridad)
+  - Alto Fit + Bajo Intent  → sigue CALIFICADO (nurture) — NO se descarta por falta de prensa
+  - Bajo Fit                → descalificado (no encaja con el ICP)
+
+Los sub-scores (0–100) los produce el LLM con una rúbrica; el score compuesto se
+calcula de forma DETERMINISTA aquí (más confiable que pedirle el 0–100 final al LLM).
+"""
+
+from typing import Optional
+
+# ── Pesos del score compuesto ───────────────────────────────────────────────────
+# Con contacto identificado (lead individual):
+W_FIT_LEAD = 0.45
+W_INTENT_LEAD = 0.30
+W_ROLE_LEAD = 0.25
+
+# A nivel cuenta (EMPRESA APTA, sin contacto decisor identificado):
+W_FIT_ACCOUNT = 0.60
+W_INTENT_ACCOUNT = 0.40
+
+# ── Umbrales ─────────────────────────────────────────────────────────────────────
+# Fit mínimo para calificar la cuenta CUANDO hay trigger reciente (intent presente).
+FIT_MIN_WITH_INTENT = 45
+# Fit mínimo (más exigente) CUANDO no hay trigger reciente, para evitar aprobar
+# cuentas solo por conocimiento previo del modelo (anti-alucinación).
+FIT_MIN_NO_INTENT = 60
+
+
+def _clamp(value, lo: int = 0, hi: int = 100) -> int:
+    try:
+        v = int(round(float(value)))
+    except (TypeError, ValueError):
+        return 0
+    return max(lo, min(hi, v))
+
+
+def tier_from_score(score: int) -> str:
+    """Deriva el tier comercial a partir del score compuesto (0–100)."""
+    if score >= 80:
+        return "A"
+    if score >= 60:
+        return "B"
+    if score >= 40:
+        return "C"
+    return "D"
+
+
+def compute_composite(
+    fit: int,
+    intent: int,
+    role_fit: Optional[int] = None,
+    reasons: Optional[dict] = None,
+) -> dict:
+    """Calcula el score compuesto (0–100), su tier y un desglose auditable.
+
+    Si `role_fit` es None se usa la ponderación a nivel cuenta (EMPRESA APTA);
+    si viene un valor, se usa la ponderación a nivel lead individual.
+    """
+    fit = _clamp(fit)
+    intent = _clamp(intent)
+
+    if role_fit is None:
+        composite = W_FIT_ACCOUNT * fit + W_INTENT_ACCOUNT * intent
+        weights = {"fit": W_FIT_ACCOUNT, "intent": W_INTENT_ACCOUNT}
+    else:
+        role_fit = _clamp(role_fit)
+        composite = W_FIT_LEAD * fit + W_INTENT_LEAD * intent + W_ROLE_LEAD * role_fit
+        weights = {"fit": W_FIT_LEAD, "intent": W_INTENT_LEAD, "role_fit": W_ROLE_LEAD}
+
+    match_score = _clamp(composite)
+    tier = tier_from_score(match_score)
+
+    breakdown = {
+        "fit_score": fit,
+        "intent_score": intent,
+        "role_fit_score": role_fit,
+        "weights": weights,
+        "match_score": match_score,
+        "tier": tier,
+    }
+    if reasons:
+        breakdown["reasons"] = reasons
+
+    return {
+        "fit_score": fit,
+        "intent_score": intent,
+        "role_fit_score": role_fit,
+        "match_score": match_score,
+        "score_tier": tier,
+        "score_breakdown": breakdown,
+    }
+
+
+def account_qualifies(fit: int, has_recent_trigger: bool) -> bool:
+    """Decide si la CUENTA califica usando lógica fit-first.
+
+    - Con trigger reciente: basta superar FIT_MIN_WITH_INTENT.
+    - Sin trigger reciente: se exige un fit mayor (FIT_MIN_NO_INTENT) para no
+      aprobar empresas solo por prior del modelo.
+    """
+    fit = _clamp(fit)
+    threshold = FIT_MIN_WITH_INTENT if has_recent_trigger else FIT_MIN_NO_INTENT
+    return fit >= threshold
+
+
+def disqualified_scores(fit: int, intent: int, reasons: Optional[dict] = None) -> dict:
+    """Scoring para filas DESCALIFICADAS: conserva fit/intent por transparencia,
+    pero fuerza match_score=0 y tier 'D' para que queden al fondo del ranking
+    (no inflar el orden con el intent de una cuenta que no encaja)."""
+    fit = _clamp(fit)
+    intent = _clamp(intent)
+    breakdown = {"fit_score": fit, "intent_score": intent, "match_score": 0, "tier": "D", "disqualified": True}
+    if reasons:
+        breakdown["reasons"] = reasons
+    return {
+        "fit_score": fit,
+        "intent_score": intent,
+        "role_fit_score": None,
+        "match_score": 0,
+        "score_tier": "D",
+        "score_breakdown": breakdown,
+    }
