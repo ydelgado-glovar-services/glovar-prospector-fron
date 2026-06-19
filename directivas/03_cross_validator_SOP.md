@@ -69,3 +69,14 @@ La calificación de leads opera bajo un modelo de tres estados, implementado de 
 - **Rotación de Claves Groq (Round-Robin API Key Rotator):** Rotación dinámica entre claves configuradas (`GROQ_API_KEY_1`, `GROQ_API_KEY_2`, etc.) con jitter delays.
 - **Función Centralizada `_call_groq_with_retry`:** Todas las llamadas al LLM usan una función utilitaria centralizada que encapsula la rotación de claves, pacing con jitter, y reintentos exponenciales (máx. 3 intentos).
 - **Función Centralizada `_serialize_news`:** Serialización de noticias para Supabase encapsulada en una función utilitaria que acepta un flag `full` para controlar si se guarda la lista completa o solo un subconjunto.
+
+
+
+---
+
+## Addendum v3.12 — Scoring ICP y calificación FIT-FIRST (Auditoría #1, #2, #3, #5)
+- La calificación deja de ser binaria y centrada en noticias. Ahora se puntúa **FIT (ICP)** e **INTENT (trigger)** 0–100 y se calcula un `match_score` compuesto + tier (A/B/C/D).
+- **Fit-first:** los pre-filtros de noticias ya NO descartan empresas; solo determinan `has_recent_trigger`. Una empresa de alto fit **sin** noticias sigue calificada (nurture, intent=0). Los anti-perfiles se rechazan.
+- Fase 2 asigna `role_fit_score` por contacto y no inventa noticias cuando la calificación es por fit.
+- **Determinismo:** `temperature=0.1` en todas las llamadas de calificación (Fase 1 y 2).
+- Detalle completo y fórmulas en `directivas/09_lead_scoring_engine_SOP.md`.

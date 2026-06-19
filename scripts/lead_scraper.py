@@ -26,6 +26,11 @@ except Exception:
 
 load_dotenv()
 
+# ── AUDITORÍA #8: Modelo Groq configurable por entorno ──────────────────────────
+GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+
 def get_next_groq_key(company_name: str = "") -> str:
     """Rotador determinista y sin estado (Stateless Hashing) de claves de API de Groq."""
     keys = []
@@ -138,7 +143,7 @@ async def validate_leads_with_llm(company_name: str, target_roles: list[str], le
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model=GROQ_MODEL_REASONING,
             temperature=0.0,
             response_format={"type": "json_object"}
         )
@@ -429,12 +434,12 @@ async def fallback_tavily_search(company_name: str, target_roles: list[str], ori
             try:
                 response = await client.post(
                     "https://api.tavily.com/search",
-                    json={"api_key": tavily_key, "query": query, "search_depth": "advanced", "max_results": 3}
+                    json={"api_key": tavily_key, "query": query, "search_depth": "advanced", "max_results": 5}
                 )
                 results = response.json().get("results", [])
                 role_count = 0
                 for item in results:
-                    if role_count >= 2:
+                    if role_count >= 3:
                         break
                     url = item.get("url") or ""
                     if "linkedin.com/in/" not in url:
@@ -560,7 +565,7 @@ async def scrape_linkedin_targets(company_name: str) -> list[dict]:
         queries.append(f'site:linkedin.com/in/ {search_company} {" ".join(words[:2]) if len(words) > 1 else role}{country_str}')
     payload = {
         "queries": "\n".join(queries),
-        "resultsPerPage": 3,
+        "resultsPerPage": 5,
         "maxPagesPerQuery": 1,
         "mobileResults": False,
         "aiMode": "aiModeOff"
@@ -613,7 +618,7 @@ async def scrape_linkedin_targets(company_name: str) -> list[dict]:
                                 for query_result in items:
                                     role_count = 0
                                     for item in query_result.get("organicResults", []):
-                                        if role_count >= 2:
+                                        if role_count >= 3:
                                             break
                                         url = item.get("url") or ""
                                         if "linkedin.com/in/" not in url:
@@ -650,35 +655,53 @@ async def scrape_linkedin_targets(company_name: str) -> list[dict]:
             logger.error(f"Apify execution failure, using fallback: {e}")
             output_leads = await fallback_tavily_search(search_company, target_roles, original_company_name=company_name)
 
-    # relevance slice to top 6 to ensure role diversity is validated
-    final_leads = output_leads[:6]
+    # relevance slice to top 8 to improve decision-maker recall while keeping enrichment cost bounded
+    final_leads = output_leads[:8]
     
     # Run adaptive, industry-agnostic LLM pre-flight validation on the candidates
     final_leads = await validate_leads_with_llm(search_company, target_roles, final_leads)
 
     # Cascade B2B Enrichment (only for non-disqualified leads)
+    # AUDITORÍA #6: se registra el ORIGEN del email y si está verificado, para no
+    # contactar a ciegas direcciones inferidas por patrón (riesgo de rebote).
     if final_leads:
         domain = get_company_domain(search_company)
         for lead in final_leads:
             if lead.get("is_disqualified"):
-                lead["email"] = None # No contaminar con email de otra empresa
+                lead["email"] = None  # No contaminar con email de otra empresa
+                lead["email_source"] = None
+                lead["email_verified"] = False
                 continue
             full_name = f"{lead['first_name']} {lead['last_name']}".strip()
-            
-            # 1. Intentar enriquecer prioritariamente con Apollo.io
+
+            email = None
+            email_source = None
+            email_verified = False
+
+            # 1. Apollo.io (verificado)
             email = enrich_lead_with_apollo(full_name, domain)
-            
-            # 2. Si Apollo no encuentra o falla, intentar con Hunter.io (con Quota Guard)
+            if email:
+                email_source = "apollo"
+                email_verified = True
+
+            # 2. Hunter.io (verificado, con Quota Guard)
             if not email:
                 email = enrich_lead_with_hunter(full_name, domain)
-                
-            # 3. Si ambos fallan, usar la heurística determinista como fallback final de la cascada
+                if email:
+                    email_source = "hunter"
+                    email_verified = True
+
+            # 3. Heurística determinista (INFERIDO por patrón — NO verificado)
             if not email:
                 email = execute_deterministic_pattern_fallback(full_name, domain)
-                logger.info(f"Using B2B deterministic pattern fallback for {full_name}: {email}")
-                
+                email_source = "pattern_inferred"
+                email_verified = False
+                logger.info(f"Using B2B deterministic pattern fallback for {full_name}: {email} (email_verified=False)")
+
             lead["email"] = email
-            
+            lead["email_source"] = email_source
+            lead["email_verified"] = email_verified
+
     return final_leads
 
 if __name__ == "__main__":

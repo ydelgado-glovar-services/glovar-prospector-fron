@@ -38,7 +38,7 @@ def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
 
 app = FastAPI(
     title="Glovar Lead Prospector Enterprise API",
-    version="3.11.0",
+    version="3.12.0",
     dependencies=[Depends(verify_api_key)]
 )
 
@@ -314,7 +314,9 @@ async def get_leads(
         query = supabase.table("leads").select("*").eq("user_id", user_id)
         if job_id and job_id.strip() and job_id not in ("undefined", "null", "None"):
             query = query.eq("job_id", job_id)
-        query = query.order("created_at", desc=True).limit(500)
+        # AUDITORÍA #2: ordenar por match_score desc ("los mejores primero").
+        # Empate por created_at desc para estabilidad temporal.
+        query = query.order("match_score", desc=True).order("created_at", desc=True).limit(500)
         response = query.execute()
         return {"leads": response.data}
     except Exception as e:

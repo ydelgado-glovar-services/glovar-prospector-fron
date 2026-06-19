@@ -28,6 +28,10 @@ except Exception:
 
 load_dotenv()
 
+# ── AUDITORÍA #8: Modelo Groq configurable por entorno ──────────────────────────
+GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+
 
 async def _tavily_search(api_key: str, query: str, max_results: int = 5, label: str = "search") -> list[dict]:
     """Ejecuta una búsqueda individual en Tavily y retorna los resultados."""
@@ -154,7 +158,7 @@ async def generate_human_search_plan(company_name: str, extracted_intent: dict) 
         time.sleep(2.0)  # Pacing delay
 
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model=GROQ_MODEL_REASONING,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}

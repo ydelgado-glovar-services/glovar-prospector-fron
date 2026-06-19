@@ -44,3 +44,12 @@
     2. **Alineación de Cargo (Role Fit — FILTRO PRINCIPAL):** El criterio de descalificación principal es `is_role_match`. Mapea semántica y conceptualmente si el cargo del lead se alinea con los roles decisores autorizados por el usuario (`cargo_decision`), descartando cargos basura o genéricos sin importar el sector.
   - **Lógica de Descalificación (Fix D):** Un lead se descalifica SOLO si `is_role_match = false` o si `is_active_employee = false` (ex-empleado explícito). La presencia de una empresa diferente en el título HTML ya NO es criterio de descalificación por sí sola.
   - **Acción:** Si el LLM descalifica al candidato, se le marca como `is_disqualified = True`, se le asigna `email = None`, y se omite el 100% de las consultas de enriquecimiento B2B. En caso contrario, se sobrescriben los campos `first_name`, `last_name` y `title` con las entidades limpias extraídas por el LLM.
+
+
+
+---
+
+## Addendum v3.12 — Recall y verificación de email (Auditoría #6)
+- Mayor recall de decisores: `resultsPerPage` subido a 5, tope por rol a 3, y slice a los top-8 candidatos.
+- Cada lead persiste el **origen del email**: `email_source` ∈ {`apollo`, `hunter`, `pattern_inferred`} y `email_verified` (true solo con Apollo/Hunter). El patrón determinista `nombre.apellido@dominio` queda marcado como **no verificado** para evitar rebotes.
+- Modelo Groq configurable por entorno (`GROQ_MODEL_REASONING`). Ver `directivas/09_lead_scoring_engine_SOP.md`.

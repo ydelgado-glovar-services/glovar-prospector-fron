@@ -36,6 +36,12 @@ except Exception:
 
 load_dotenv()
 
+# ── AUDITORÍA #8: Modelo Groq configurable por entorno ──────────────────────────
+# Por defecto mantiene Llama-4-Scout para no alterar la calidad actual.
+GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+
 def get_next_groq_key(company_name: str = "") -> str:
     """Rotador determinista y sin estado (Stateless Hashing) de claves de API de Groq."""
     keys = []
@@ -123,7 +129,7 @@ def extract_strategic_intent(form_data: dict) -> dict:
         time.sleep(2.0)
         
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model=GROQ_MODEL_REASONING,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -153,9 +159,9 @@ def extract_strategic_intent(form_data: dict) -> dict:
 
 
 class CompanyDiscoveryResult(BaseModel):
-    companies: list[str] = Field(description="List of exactly 15 to 20 real companies fitting the requested criteria parameters.")
+    companies: list[str] = Field(description="List of real companies fitting the requested criteria parameters (up to the requested limit).")
 
-def discover_companies(industry: str, size: str, country: str, extracted_intent: dict) -> list[str]:
+def discover_companies(industry: str, size: str, country: str, extracted_intent: dict, limit: int = 15) -> list[str]:
     # Grammatical Country Syntax Query Helper
     formatted_country = country.strip()
     country_lower = formatted_country.lower()
@@ -171,33 +177,60 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
     # Cognitive Query: use Phase 0 intent tokens for precision company discovery
     cognitive_tokens = " ".join([t for t in extracted_intent.get("optimized_search_tokens", []) if t])
     core_industry = extracted_intent.get("target_industry_core", industry)
-    query = f"list of active real {core_industry} companies headquartered and operating in {formatted_country} with {size} employees matching: {cognitive_tokens}"
-    logger.info(f"Cognitive company discovery query: '{query[:180]}'")
+
+    # ── AUDITORÍA #4: Descubrimiento multi-ángulo ──────────────────────────────
+    # Antes el universo salía de UNA sola búsqueda (12 snippets) → recall bajo y
+    # sesgado a "listas top 10". Ahora lanzamos 3 consultas con ángulos distintos
+    # y fusionamos/deduplicamos por URL para un pool más amplio y diverso.
+    discovery_queries = [
+        # Ángulo 1: directorios / listados de empresas del nicho
+        f"list of active {core_industry} companies operating in {formatted_country} with {size} employees {cognitive_tokens}",
+        # Ángulo 2: líderes / mayores actores del sector (captura cuentas top)
+        f"largest and leading {core_industry} companies in {formatted_country} {cognitive_tokens}",
+        # Ángulo 3: orientado a la intención/dolor específico del ICP
+        f"{core_industry} companies {formatted_country} {cognitive_tokens} {extracted_intent.get('b2b_buying_trigger_context', '')}",
+    ]
+    logger.info(f"Multi-angle company discovery ({len(discovery_queries)} queries) for '{core_industry}' in {formatted_country}.")
 
     tavily_key: str = os.getenv("TAVILY_API_KEY", "")
     if not tavily_key:
         logger.error("Tavily API key not found.")
         return []
-    raw_context = ""
+
+    seen_urls: set[str] = set()
+    snippets: list[str] = []
     try:
         with httpx.Client(timeout=20.0) as client:
-            response = client.post(
-                "https://api.tavily.com/search",
-                json={"api_key": tavily_key, "query": query, "search_depth": "advanced", "max_results": 12}
-            )
-            if response.status_code == 200:
-                results = response.json().get("results", [])
-                snippets = [f"Title: {r.get('title')}\nContent: {r.get('content') or r.get('snippet')}" for r in results]
-                raw_context = "\n\n".join(snippets)
-            else:
-                logger.error(f"Tavily search failed with status {response.status_code}")
+            for q in discovery_queries:
+                try:
+                    response = client.post(
+                        "https://api.tavily.com/search",
+                        json={"api_key": tavily_key, "query": q, "search_depth": "advanced", "max_results": 10}
+                    )
+                    if response.status_code == 200:
+                        results = response.json().get("results", [])
+                        for r in results:
+                            url = r.get("url") or ""
+                            # Deduplicar por URL para no repetir las mismas fuentes entre ángulos
+                            if url and url in seen_urls:
+                                continue
+                            if url:
+                                seen_urls.add(url)
+                            snippets.append(f"Title: {r.get('title')}\nContent: {r.get('content') or r.get('snippet')}")
+                    else:
+                        logger.error(f"Tavily discovery query failed with status {response.status_code}")
+                except Exception as inner:
+                    logger.warning(f"Discovery query skipped due to error: {inner}")
+                    continue
     except Exception as e:
         logger.error(f"Error calling Tavily Search API: {e}")
         return []
 
+    raw_context = "\n\n".join(snippets)
     if not raw_context:
-        logger.error("No raw context retrieved from Tavily.")
+        logger.error("No raw context retrieved from Tavily across all discovery angles.")
         return []
+    logger.info(f"Discovery aggregated {len(snippets)} unique snippets across {len(discovery_queries)} angles.")
 
     # Enforce strict pacing delay of 3.0 seconds before Groq call
     logger.info("Enforcing strict 3.0s pacing delay before querying Groq...")
@@ -220,6 +253,8 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
     
     EXTRACT CRITERIA:
     Prioritize extracting real, active, and verified company names listed or referenced inside the search results snippets that match the requested criteria.
+    Extract UP TO {limit} distinct company names (return as many genuine matches as you can find, but never exceed {limit}).
+    Prioritize companies that plausibly fall within the requested employee-size band ({size}).
     Do NOT invent, placeholder, or hallucinate company names. Only return company names that actually exist in the search snippets or are highly verified matching targets. Never list fictional companies.
 
     Return a structured JSON array under the key 'companies'.
@@ -235,7 +270,7 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
             api_key = get_next_groq_key(industry)
             groq_client = Groq(api_key=api_key)
             chat_completion = groq_client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model=GROQ_MODEL_REASONING,
                 messages=[
                     {
                         "role": "system",
@@ -246,7 +281,8 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
                         "content": prompt
                     }
                 ],
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                temperature=0.1
             )
             extraction_response = chat_completion.choices[0].message.content
             break
@@ -319,6 +355,14 @@ def main() -> None:
     industry: str = form_data["sector"]
     size: str = form_data["tamano_empresa"]
 
+    # ── AUDITORÍA #7: conectar el slider "Límite de perfiles" (5–25) al cap real ──
+    # Antes el descubrimiento estaba fijo en 15–20 y capado a 20 sin importar el slider.
+    try:
+        limite_perfiles = int(form_data.get("limite_perfiles", 15))
+    except (TypeError, ValueError):
+        limite_perfiles = 15
+    limite_perfiles = max(5, min(25, limite_perfiles))
+
     # ══════════════════════════════════════════════════════════════════════
     # FASE 0: Pre-flight Cognitive Intent Parser
     # Traduce el formulario crudo en un manifiesto de búsqueda estratégico
@@ -335,13 +379,13 @@ def main() -> None:
     logger.info("Runtime context enriched with Phase 0 cognitive intent manifest.")
 
     country: str = form_data.get("pais") or "Colombia"
-    discovered_companies: list[str] = discover_companies(industry, size, country, extracted_intent)
+    discovered_companies: list[str] = discover_companies(industry, size, country, extracted_intent, limit=limite_perfiles)
     if not discovered_companies:
         logger.info("No companies discovered. Pipeline halting gracefully.")
         sys.exit(0)
         
     exclusion_list: list[str] = [name.strip().lower() for name in form_data.get("exclusion_list", [])]
-    clean_companies: list[str] = [c for c in discovered_companies if c.strip().lower() not in exclusion_list][:20]  # Enforce strict maximum of 20 companies per execution run to prevent LLM extraction overflow
+    clean_companies: list[str] = [c for c in discovered_companies if c.strip().lower() not in exclusion_list][:limite_perfiles]  # Cap dinámico = límite de perfiles solicitado por el usuario (5–25)
     
     if not clean_companies:
         logger.info("All targets matched blacklist exclusion array parameters. Exiting.")
