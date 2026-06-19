@@ -748,12 +748,34 @@ export default function DashboardPage() {
     }
   }
 
-  const handleLoadQuery = (query: SavedQuery) => {
+  const handleLoadQuery = async (query: SavedQuery) => {
     // [Safety Mechanism]: Clean history loading without triggering side effects
     setForm(query.search_params)
     setActiveQueryId(query.id)
-    setResults([])
-    setHasSearched(false)
+    
+    if (query.result_job_id && session?.access_token) {
+      setIsLoading(true)
+      try {
+        const leadsResponse = await apiFetch(`/api/v1/leads?job_id=${query.result_job_id}`, { token: session.access_token })
+        if (leadsResponse.ok) {
+          const leadsData = await leadsResponse.json()
+          setResults(leadsData.leads ?? [])
+          setHasSearched(true)
+        } else {
+          setResults([])
+          setHasSearched(false)
+        }
+      } catch (err) {
+        console.error("Error fetching leads for saved query", err)
+        setResults([])
+        setHasSearched(false)
+      } finally {
+        setIsLoading(false)
+      }
+    } else {
+      setResults([])
+      setHasSearched(false)
+    }
   }
 
   const handleDeleteQuery = async (id: string) => {
