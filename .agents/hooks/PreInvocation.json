@@ -1,0 +1,15 @@
+{
+    "hook_type": "PreInvocation",
+    "name": "env-cryptographic-guardrail",
+    "description": "Intercepts execution before calling Gemini to ensure local tokens are active.",
+    "rules": {
+        "enforce_keys": [
+            "TAVILY_API_KEY",
+            "APIFY_API_TOKEN",
+            "GEMINI_API_KEY",
+            "SUPABASE_SERVICE_ROLE_KEY"
+        ],
+        "on_missing": "abort",
+        "terminal_output": "Execution halted by PreInvocation Hook: Missing mandatory credentials inside your local .env file."
+    }
+}

@@ -1,0 +1,36 @@
+# DIRECTIVA: PIPELINE_ORCHESTRATOR_EXECUTION_SOP
+
+> **ID:** SOP-ORCHESTRATOR-004
+> **Script Asociado:** `app.py`
+> **Estado:** ACTIVO
+
+## 1. Objetivos y Alcance
+- **Objetivo Principal:** Garantizar que el orquestador backend de FastAPI (`app.py`) invoque el script principal del pipeline (`scripts/main.py`) utilizando el entorno virtual local (`.venv`) si está disponible.
+- **Aislamiento de Dependencias:** Al priorizar el ejecutable del entorno virtual local sobre el intérprete global del sistema, se asegura que las dependencias requeridas por el pipeline (como `httpx`, `pydantic`, etc.) estén correctamente aisladas y disponibles durante la ejecución en subprocesos.
+
+---
+
+## 2. Contrato de Resolución de Entorno (Windows)
+- **Ruta Objetivo del Intérprete:** `.venv/Scripts/python.exe`
+- **Lógica de Decisión Determinista:**
+  1. El orquestador debe intentar construir la ruta local utilizando `os.path.join(".venv", "Scripts", "python.exe")`.
+  2. Mediante la función `os.path.exists()`, debe evaluar si el archivo ejecutable existe físicamente en el espacio de trabajo.
+  3. **Caso de Éxito:** Si el archivo existe en el disco, se debe usar como el binario de ejecución del subproceso para correr `scripts/main.py`.
+  4. **Caso Fallback (Seguridad):** Si no existe, debe degradar de forma segura al intérprete del sistema actual utilizando `sys.executable`.
+
+---
+
+## 3. Restricciones y Pautas de Gobernanza
+- **Prohibición de Rutas Absolutas:** Bajo ninguna circunstancia se deben codificar rutas absolutas del sistema operativo (`C:\Users\...` o similares) que dependan de la máquina local del desarrollador. Todas las resoluciones deben ser relativas al espacio de trabajo.
+- **Estabilidad de Ejecución:** El orquestador no debe lanzar excepciones de enrutamiento si el entorno virtual local no está configurado. Debe realizar la validación de forma tolerante a fallos y asegurar que el fallback mantenga el pipeline operativo.
+- **Procesamiento Concurrente de Empresas (ThreadPoolExecutor, Idempotencia & Límite de Lote):** El orquestador principal (`main.py`) procesa el lote de empresas objetivo en paralelo utilizando un pool de hilos (`ThreadPoolExecutor`) con **3 workers concurrentes** para máxima velocidad de prospección. La estabilidad en contenedores de producción (Modal) se garantiza mediante el mecanismo de **Idempotencia Activa** que consulta Supabase antes de procesar cada empresa: si ya fue validada para el `job_id` activo, se salta instantáneamente. Esto convierte cualquier reinicio de contenedor de Modal (preemption) de un evento catastrófico a una molestia menor sin pérdida de créditos de API. El contenedor de Modal dispone de **2048 MB de RAM** declarados explícitamente para absorber la carga de 3 subprocesos Python concurrentes con peticiones HTTP simultáneas. Asimismo, se impone un **tope estricto de máximo 20 empresas limpias por job**.
+- **Fase 0: Pre-flight Cognitive Intent Parser:** Antes de cualquier búsqueda o descubrimiento de empresas, el orquestador ejecuta `extract_strategic_intent(form_data)` que utiliza el LLM (`meta-llama/llama-4-scout-17b-16e-instruct`) para traducir el formulario crudo del cliente en un **Manifiesto de Búsqueda Estratégico** (`extracted_intent`) con las siguientes claves cognitivas:
+  - `optimized_search_tokens`: Los 4 mejores términos de búsqueda optimizados para motores.
+  - `target_industry_core`: El nicho de industria normalizado al estándar inglés.
+  - `b2b_buying_trigger_context`: Traducción precisa del evento que dispara una venta.
+  - `rigorous_pain_framework`: Explicación académica del fallo operativo que sufren los prospectos.
+  - `target_market_region`: Región geográfica normalizada.
+  Este manifiesto se persiste en `.tmp/active_runtime_context.json` bajo la clave `"extracted_intent"` y alimenta a los scripts downstream (`news_scraper.py`, `validator.py`).
+- **Descubrimiento de Empresas Cognitivo:** La función `discover_companies(industry, size, country, extracted_intent)` usa directamente los `optimized_search_tokens` y `target_industry_core` del manifiesto cognitivo para construir queries de Tavily de alta precisión. No acepta ni requiere `advanced_keywords` ni strings de keywords crudos del formulario.
+
+
