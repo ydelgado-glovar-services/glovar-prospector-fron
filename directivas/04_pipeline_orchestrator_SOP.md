@@ -34,3 +34,13 @@
 - **Descubrimiento de Empresas Cognitivo:** La función `discover_companies(industry, size, country, extracted_intent)` usa directamente los `optimized_search_tokens` y `target_industry_core` del manifiesto cognitivo para construir queries de Tavily de alta precisión. No acepta ni requiere `advanced_keywords` ni strings de keywords crudos del formulario.
 
 
+
+
+
+---
+
+## Addendum v3.12 — Descubrimiento ampliado y slider conectado (Auditoría #4, #7, #8)
+- **Descubrimiento multi-ángulo:** `discover_companies` lanza 3 consultas Tavily (directorio, líderes del sector, intención/dolor) y fusiona/deduplica por URL para un universo más amplio y menos sesgado.
+- **Slider conectado:** el cap de empresas a procesar = `limite_perfiles` (5–25). Antes estaba fijo en 20 y el slider no surtía efecto.
+- **Modelo configurable:** `GROQ_MODEL_REASONING` / `GROQ_MODEL_FAST` por entorno (default Llama-4-Scout).
+- Ver `directivas/09_lead_scoring_engine_SOP.md`.

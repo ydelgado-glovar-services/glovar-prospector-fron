@@ -1,6 +1,15 @@
 # GLOVAR PROSPECTOR — ARQUITECTURA TÉCNICA Y MANUAL DE OPERACIÓN
-**Versión de Producción:** `3.11.0`  
+**Versión de Producción:** `3.12.0`  
 **Autoría:** Glovar Services & Antigravity AI  
+
+> **Changelog 3.12.0 — Motor de Scoring ICP (Fit + Intent)**
+> - **Calificación FIT-FIRST:** se deja de descartar empresas por falta de noticias. Se puntúa FIT (ICP) e INTENT (trigger) 0–100; alto fit sin trigger sigue calificado (nurture). Ver `directivas/09_lead_scoring_engine_SOP.md`.
+> - **Scoring + ranking:** `match_score` (0–100) + tier A/B/C/D; los leads se ordenan por los mejores primero. Nuevo `scripts/scoring.py`.
+> - **Determinismo:** `temperature=0.1` en toda la calificación (resultados reproducibles).
+> - **Descubrimiento ampliado:** 3 consultas Tavily multi-ángulo + el slider "Límite de perfiles" ahora controla el cap real de empresas.
+> - **Verificación de email:** se distingue email verificado (Apollo/Hunter) vs inferido por patrón (badge "Estimado").
+> - **Modelo Groq configurable:** `GROQ_MODEL_REASONING` / `GROQ_MODEL_FAST`.
+> - **Migración DB:** `db/migrations/002_lead_scoring_and_email_verification.sql`.
 
 > **Changelog 3.11.0**
 > - **Fix crítico de build:** el `.gitignore` raíz (plantilla Python) ignoraba la carpeta `lib/` del frontend; se ancló a `/lib/` y se restauraron `lib/{types,api,utils}.ts`.
