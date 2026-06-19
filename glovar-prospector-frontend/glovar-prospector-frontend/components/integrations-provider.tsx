@@ -17,7 +17,7 @@ interface IntegrationsContextValue {
   isConnected: boolean
   isLoading: boolean
   checkStatus: () => Promise<void>
-  sendEmail: (params: { leadId: string; subject: string; body: string }) => Promise<boolean>
+  sendEmail: (params: { leadId: number | string; subject: string; body: string }) => Promise<boolean>
 }
 
 const IntegrationsContext = createContext<IntegrationsContextValue>({
@@ -89,7 +89,7 @@ export function IntegrationsProvider({ children }: { children: ReactNode }) {
     checkStatus()
   }, [checkStatus])
 
-  const sendEmail = useCallback(async ({ leadId, subject, body }: { leadId: string; subject: string; body: string }) => {
+  const sendEmail = useCallback(async ({ leadId, subject, body }: { leadId: number | string; subject: string; body: string }) => {
     if (!session?.access_token) {
       toast({
         title: "Sesión expirada",

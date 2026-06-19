@@ -1,6 +1,13 @@
 # GLOVAR PROSPECTOR — ARQUITECTURA TÉCNICA Y MANUAL DE OPERACIÓN
-**Versión de Producción:** `3.10.0`  
+**Versión de Producción:** `3.11.0`  
 **Autoría:** Glovar Services & Antigravity AI  
+
+> **Changelog 3.11.0**
+> - **Fix crítico de build:** el `.gitignore` raíz (plantilla Python) ignoraba la carpeta `lib/` del frontend; se ancló a `/lib/` y se restauraron `lib/{types,api,utils}.ts`.
+> - **Guardado de consultas con versionado:** nuevos endpoints `PUT`/`DELETE /api/v1/queries/{id}`, `POST` devuelve objeto único, anclaje de resultados (`result_job_id`) por versión. Ver `directivas/07_saved_queries_versioning_SOP.md`.
+> - **Mini-CRM integrado:** tablas `crm_leads`/`crm_lead_notes`, endpoints `/api/v1/crm/*`, apartado Kanban "Mis Leads / CRM". Ver `directivas/08_crm_pipeline_SOP.md`.
+> - **Hardening:** CORS configurable (`ALLOWED_ORIGINS`), whitelist en el webhook interno de telemetría, llamadas Supabase en `run_in_threadpool`.
+> - **Migración DB:** `db/migrations/001_saved_queries_versioning_and_crm.sql`.
 
 ---
 
@@ -41,7 +48,8 @@ El sistema está construido bajo una filosofía **decapitada (headless), serverl
                              ▼                                            │
  ┌────────────────────────────────────────────────────────────────────────┴┐
  │                 Data Cluster (Cloud Supabase - PostgreSQL)              │
- │  - Tablas: leads, jobs_status, saved_queries, user_profiles             │
+ │  - Tablas: leads, jobs_status, saved_queries, user_profiles,            │
+ │            crm_leads, crm_lead_notes                                     │
  │  - Políticas de Aislamiento de Clientes (Row Level Security - RLS)      │
  └─────────────────────────────────────────────────────────────────────────┘
 ```

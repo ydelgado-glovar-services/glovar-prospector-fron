@@ -4,6 +4,7 @@ import { Analytics } from "@vercel/analytics/next"
 import { Toaster } from "@/components/ui/toaster"
 import { AuthProvider } from "@/components/auth-provider"
 import { IntegrationsProvider } from "@/components/integrations-provider"
+import { CrmProvider } from "@/components/crm-provider"
 import "./globals.css"
 
 const geist = Geist({
@@ -32,7 +33,9 @@ export default function RootLayout({
       <body className="font-sans antialiased bg-background text-foreground">
         <AuthProvider>
           <IntegrationsProvider>
-            {children}
+            <CrmProvider>
+              {children}
+            </CrmProvider>
           </IntegrationsProvider>
         </AuthProvider>
         {process.env.NODE_ENV === "production" && <Analytics />}

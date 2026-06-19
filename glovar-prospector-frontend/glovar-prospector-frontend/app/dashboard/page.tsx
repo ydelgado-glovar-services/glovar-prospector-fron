@@ -680,33 +680,58 @@ export default function DashboardPage() {
 
   // --- Handlers de Historial ---
 
-  const handleSaveQuery = async (name: string, isOverwrite: boolean = false, existingId?: string) => {
+  const handleSaveQuery = async (
+    name: string,
+    isOverwrite: boolean = false,
+    existingId?: string,
+    extra?: { tags?: string[]; result_job_id?: string | null; parent_query_id?: string | null },
+  ) => {
     if (!session) return
 
+    // Ancla de resultados: el job_id de la ejecución vigente (todos los leads del
+    // run comparten el mismo job_id) queda ligado a esta versión de la consulta.
+    const anchoredJobId =
+      extra?.result_job_id ?? results.find((r) => r.job_id)?.job_id ?? null
+
     try {
-      let response;
+      let response
       if (isOverwrite && existingId) {
         response = await apiFetch(`/api/v1/queries/${existingId}`, {
           method: "PUT",
           token: session.access_token,
-          body: JSON.stringify({ query_name: name, search_params: form }),
+          body: JSON.stringify({
+            query_name: name,
+            search_params: form,
+            tags: extra?.tags ?? [],
+            result_job_id: anchoredJobId,
+          }),
         })
       } else {
         response = await apiFetch("/api/v1/queries", {
           method: "POST",
           token: session.access_token,
-          body: JSON.stringify({ query_name: name, search_params: form }),
+          body: JSON.stringify({
+            query_name: name,
+            search_params: form,
+            tags: extra?.tags ?? [],
+            result_job_id: anchoredJobId,
+            parent_query_id: extra?.parent_query_id ?? null,
+          }),
         })
       }
 
       if (response.ok) {
         const data = await response.json()
-        if (!isOverwrite) {
+        // El backend ahora devuelve un OBJETO único, por lo que data.id es válido
+        // y permite fijar el activeQueryId para habilitar el versionado posterior.
+        if (data?.id) {
           setActiveQueryId(data.id)
         }
         toast({
-          title: "Consulta guardada",
-          description: "Tu consulta ha sido guardada en la nube.",
+          title: isOverwrite ? "Consulta actualizada (nueva versión)" : "Consulta guardada",
+          description: isOverwrite
+            ? "Se creó una nueva versión y los resultados quedaron anclados a ella."
+            : "Tu consulta ha sido guardada en la nube.",
         })
         fetchQueries()
       } else {
@@ -723,12 +748,34 @@ export default function DashboardPage() {
     }
   }
 
-  const handleLoadQuery = (query: SavedQuery) => {
+  const handleLoadQuery = async (query: SavedQuery) => {
     // [Safety Mechanism]: Clean history loading without triggering side effects
     setForm(query.search_params)
     setActiveQueryId(query.id)
-    setResults([])
-    setHasSearched(false)
+    
+    if (query.result_job_id && session?.access_token) {
+      setIsLoading(true)
+      try {
+        const leadsResponse = await apiFetch(`/api/v1/leads?job_id=${query.result_job_id}`, { token: session.access_token })
+        if (leadsResponse.ok) {
+          const leadsData = await leadsResponse.json()
+          setResults(leadsData.leads ?? [])
+          setHasSearched(true)
+        } else {
+          setResults([])
+          setHasSearched(false)
+        }
+      } catch (err) {
+        console.error("Error fetching leads for saved query", err)
+        setResults([])
+        setHasSearched(false)
+      } finally {
+        setIsLoading(false)
+      }
+    } else {
+      setResults([])
+      setHasSearched(false)
+    }
   }
 
   const handleDeleteQuery = async (id: string) => {
