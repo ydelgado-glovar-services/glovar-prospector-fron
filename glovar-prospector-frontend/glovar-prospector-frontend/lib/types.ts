@@ -50,6 +50,26 @@ export interface ProspectResult {
   razonamiento_filtro?: string | null
   user_id?: string | null
   job_id?: string | null
+
+  // ── Scoring ICP (fit + intent) — migración 002 ──────────────────────────────
+  /** Encaje con el ICP (0-100). */
+  fit_score?: number | null
+  /** Fuerza/recencia del trigger de compra (0-100). */
+  intent_score?: number | null
+  /** Encaje del cargo del contacto (0-100). */
+  role_fit_score?: number | null
+  /** Score compuesto final (0-100) usado para ranking. */
+  match_score?: number | null
+  /** Tier comercial derivado del score: 'A' | 'B' | 'C' | 'D'. */
+  score_tier?: "A" | "B" | "C" | "D" | null
+  /** Desglose auditable del cálculo del score. */
+  score_breakdown?: Record<string, unknown> | null
+
+  // ── Verificación de email ───────────────────────────────────────────────────
+  /** Origen del email: 'apollo' | 'hunter' | 'pattern_inferred'. */
+  email_source?: "apollo" | "hunter" | "pattern_inferred" | null
+  /** true solo si proviene de una fuente verificada (Apollo/Hunter). */
+  email_verified?: boolean | null
 }
 
 /* ------------------------------------------------------------------ */

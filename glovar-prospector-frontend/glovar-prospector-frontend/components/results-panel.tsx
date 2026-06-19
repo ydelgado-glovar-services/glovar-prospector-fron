@@ -781,8 +781,40 @@ function DashboardContent({ results, formData, savedQueries, activeQueryId, onSa
 /*  Tabla con sorting                                                  */
 /* ------------------------------------------------------------------ */
 
-type SortOrder = "relevancia" | "nombre-asc"
+type SortOrder = "score" | "relevancia" | "nombre-asc"
 type TableFilter = "todos" | "calificados" | "descartados"
+
+/** Metadatos visuales por tier comercial. */
+const TIER_META: Record<string, { label: string; className: string }> = {
+  A: { label: "A", className: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/40" },
+  B: { label: "B", className: "bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/40" },
+  C: { label: "C", className: "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/40" },
+  D: { label: "D", className: "bg-slate-500/15 text-slate-500 dark:text-slate-400 border-slate-500/40" },
+}
+
+function MatchScoreCell({ result }: { result: ProspectResult }) {
+  const score = typeof result.match_score === "number" ? result.match_score : 0
+  const tier = result.score_tier || (score >= 80 ? "A" : score >= 60 ? "B" : score >= 40 ? "C" : "D")
+  const meta = TIER_META[tier] ?? TIER_META.D
+  const fit = result.fit_score ?? null
+  const intent = result.intent_score ?? null
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div className="flex items-center gap-1.5 cursor-help">
+          <span className="font-mono text-sm font-bold tabular-nums">{score}</span>
+          <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold ${meta.className}`}>{meta.label}</Badge>
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="text-xs leading-relaxed">
+        <p className="font-semibold mb-0.5">Match Score: {score}/100 · Tier {tier}</p>
+        {fit !== null && <p>Fit (ICP): {fit}/100</p>}
+        {intent !== null && <p>Intent (trigger): {intent}/100</p>}
+        {typeof result.role_fit_score === "number" && <p>Encaje de cargo: {result.role_fit_score}/100</p>}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
 
 function ReviewEmailDialog({
   result,
@@ -860,7 +892,7 @@ function ResultsTable({ results }: { results: ProspectResult[] }) {
   const { toast } = useToast()
   const { isConnected, sendEmail } = useIntegrations()
   const { isInCrm, addToCrm } = useCrm()
-  const [sortOrder, setSortOrder] = useState<SortOrder>("relevancia")
+  const [sortOrder, setSortOrder] = useState<SortOrder>("score")
   const [tableFilter, setTableFilter] = useState<TableFilter>("todos")
   const [sendingEmailId, setSendingEmailId] = useState<string | null>(null)
   const [addingCrmId, setAddingCrmId] = useState<number | null>(null)
@@ -933,6 +965,8 @@ function ResultsTable({ results }: { results: ProspectResult[] }) {
   const sortedResults = useMemo(() => {
     const copy = [...filteredResults]
     switch (sortOrder) {
+      case "score":
+        return copy.sort((a, b) => (b.match_score ?? 0) - (a.match_score ?? 0))
       case "relevancia":
         return copy.sort((a, b) => {
           if (a.es_calificado === b.es_calificado) return 0
@@ -983,6 +1017,7 @@ function ResultsTable({ results }: { results: ProspectResult[] }) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="score">Match Score (mejores primero)</SelectItem>
               <SelectItem value="relevancia">Relevancia (Calificados primero)</SelectItem>
               <SelectItem value="nombre-asc">Nombre (A-Z)</SelectItem>
             </SelectContent>
@@ -993,9 +1028,12 @@ function ResultsTable({ results }: { results: ProspectResult[] }) {
       {/* Tabla */}
       <div className="flex-1 overflow-x-auto">
         {/* Implementación de table-fixed w-full y anchos de columna estrictos */}
-        <Table className="table-fixed w-full min-w-[1300px]">
+        <Table className="table-fixed w-full min-w-[1390px]">
           <TableHeader className="sticky top-0 z-10 bg-card border-b border-border/80 shadow-2xs">
             <TableRow className="hover:bg-transparent">
+              <TableHead className="w-[90px] text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Match
+              </TableHead>
               <TableHead className="w-[150px] text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Nombre
               </TableHead>
@@ -1038,6 +1076,9 @@ function ResultsTable({ results }: { results: ProspectResult[] }) {
 
               return (
                 <TableRow key={`${nombre}-${index}`} className="align-middle hover:bg-muted/30 transition-colors">
+                  <TableCell>
+                    <MatchScoreCell result={result} />
+                  </TableCell>
                   <TableCell className="font-medium text-foreground">
                     <div className="truncate" title={nombre}>
                       {nombre}
@@ -1215,6 +1256,18 @@ function ResultsTable({ results }: { results: ProspectResult[] }) {
                         <span className="flex items-center gap-1 truncate" title={email}>
                           <Mail className="h-3 w-3 shrink-0" />
                           <span className="truncate">{email}</span>
+                          {result.email_verified === false && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="shrink-0 rounded bg-amber-500/15 px-1 py-0.5 text-[8px] font-semibold uppercase text-amber-600 dark:text-amber-400 border border-amber-500/30 cursor-help">
+                                  Estimado
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="bottom" className="max-w-xs text-xs">
+                                Email inferido por patrón (no verificado por Apollo/Hunter). Verifícalo antes de enviar para evitar rebotes.
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
                         </span>
                       ) : result.es_calificado ? (
                         <span className="flex items-center gap-1 text-[10px] italic">Sin email</span>
