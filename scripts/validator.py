@@ -19,7 +19,7 @@ import groq
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-from scripts.scoring import compute_composite, account_qualifies, disqualified_scores
+from scripts.scoring import compute_composite, account_qualifies, disqualified_scores, deterministic_role_fit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -586,6 +586,13 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
             role_fit = lead_eval.get("role_fit_score", 70 if is_approved else 0)
         else:
             logger.warning(f"No batch LLM evaluation found for lead: {full_name}. Defaulting to rejected.")
+
+        # PISO DETERMINISTA de role_fit (Issue 2): un cargo decisor reconocido
+        # (Director, CIO/CTO/CxO, VP, Gerente, Head...) nunca queda por debajo de su
+        # piso por reglas, sin importar el ruido del contexto o de la noticia.
+        target_roles_ctx = [r.strip() for r in (form_context.get("cargo_decision", "") or "").split(",") if r.strip()]
+        rule_role_fit = deterministic_role_fit(title, target_roles_ctx)
+        role_fit = max(int(role_fit or 0), rule_role_fit)
 
         try:
             if lead.get("is_human_fallback") and is_approved:
