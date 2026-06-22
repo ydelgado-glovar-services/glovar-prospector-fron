@@ -60,6 +60,101 @@ def get_next_groq_key(company_name: str = "") -> str:
     logger.info(f"Rotating Groq API Key (Stateless): selected key index {current_index % len(keys)} ({masked_key})")
     return selected_key
 
+def _dedupe_key(lead: dict):
+    """Genera (tokens_de_nombre_normalizados, empresa_normalizada) para deduplicar.
+    Colapsa tokens consecutivos repetidos (corrige basura tipo 'Alberto Alberto')."""
+    import unicodedata
+    def strip_accents(s: str) -> str:
+        return "".join(c for c in unicodedata.normalize("NFD", s or "") if unicodedata.category(c) != "Mn")
+    name = f"{lead.get('first_name','')} {lead.get('last_name','')}"
+    tokens = [strip_accents(t).lower() for t in name.split() if t.strip()]
+    collapsed: list[str] = []
+    for t in tokens:
+        if not collapsed or collapsed[-1] != t:
+            collapsed.append(t)
+    company = strip_accents(lead.get("company_name", "")).lower().strip()
+    return collapsed, company
+
+
+def _same_person(a: list[str], b: list[str]) -> bool:
+    """Misma persona si comparten el primer nombre y el conjunto más corto está
+    contenido en el más largo (cubre 'Fidel Vargas' vs 'Fidel Vargas Londoño')."""
+    if not a or not b or a[0] != b[0]:
+        return False
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return all(tok in longer for tok in shorter)
+
+
+def _lead_completeness(lead: dict):
+    """Prioridad para elegir el representante del cluster de duplicados."""
+    tokens, _ = _dedupe_key(lead)
+    return (
+        0 if lead.get("is_disqualified") else 1,  # preferir NO descalificado
+        len(tokens),                               # preferir nombre más completo
+        1 if lead.get("email") else 0,             # preferir con email
+        1 if lead.get("linkedin_url") else 0,      # preferir con URL
+    )
+
+
+def _merge_leads(primary: dict, secondary: dict) -> dict:
+    """Rellena en `primary` los campos faltantes a partir de `secondary`."""
+    for field in ("email", "linkedin_url", "title", "first_name", "last_name", "company_name"):
+        if not primary.get(field) and secondary.get(field):
+            primary[field] = secondary[field]
+    return primary
+
+
+def _clean_name(first: str, last: str):
+    """Corrige nombres con apellido duplicado por parsing ruidoso
+    (ej. first='Carlos Alberto', last='Alberto' -> 'Carlos Alberto', '')."""
+    ft = (first or "").split()
+    lt = (last or "").split()
+    # Quitar tokens iniciales del apellido que repiten el final del nombre.
+    while lt and ft and lt[0].lower() == ft[-1].lower():
+        lt.pop(0)
+    # Colapsar duplicados consecutivos dentro de cada parte.
+    def _collapse(seq):
+        out = []
+        for tok in seq:
+            if not out or out[-1].lower() != tok.lower():
+                out.append(tok)
+        return out
+    return " ".join(_collapse(ft)), " ".join(_collapse(lt))
+
+
+def deduplicate_leads(leads: list[dict]) -> list[dict]:
+    """Deduplicación ESTRICTA por (nombre normalizado + empresa) ANTES de gastar
+    tokens del LLM y de persistir. Conserva el representante más completo y fusiona
+    los campos útiles del resto del cluster."""
+    # Limpieza previa de nombres (corrige apellidos duplicados tipo 'Alberto Alberto').
+    for lead in leads:
+        cf, cl = _clean_name(lead.get("first_name", ""), lead.get("last_name", ""))
+        lead["first_name"], lead["last_name"] = cf, cl
+
+    kept: list[dict] = []
+    for lead in leads:
+        tokens, company = _dedupe_key(lead)
+        if not tokens:
+            continue  # descartar entradas sin un nombre real (páginas, posts, ruido)
+        match = None
+        for entry in kept:
+            if entry["company"] == company and _same_person(tokens, entry["tokens"]):
+                match = entry
+                break
+        if match is None:
+            kept.append({"tokens": tokens, "company": company, "lead": lead})
+        else:
+            if _lead_completeness(lead) > _lead_completeness(match["lead"]):
+                match["lead"] = _merge_leads(lead, match["lead"])
+                match["tokens"] = tokens
+            else:
+                match["lead"] = _merge_leads(match["lead"], lead)
+    deduped = [e["lead"] for e in kept]
+    if len(deduped) < len(leads):
+        logger.info(f"[Dedup] Leads unificados: {len(leads)} -> {len(deduped)} (se removieron {len(leads) - len(deduped)} clones).")
+    return deduped
+
+
 async def validate_leads_with_llm(company_name: str, target_roles: list[str], leads: list[dict]) -> list[dict]:
     """
     Utiliza un LLM (Llama 3.1 8B en Groq) rápido, económico y adaptativo para validar si
@@ -105,9 +200,14 @@ async def validate_leads_with_llm(company_name: str, target_roles: list[str], le
         "1. Active Employment (LENIENT):\n"
         "   - Set is_active_employee to TRUE by default for all candidates.\n"
         "   - Only set is_active_employee to FALSE if the title/headline EXPLICITLY contains words like \"former\", \"ex-\", \"past\", \"previo\", \"anterior\".\n"
-        "2. Role Match (PRIMARY FILTER):\n"
-        "   - Does the candidate's title fit the target roles conceptually or contextually?\n"
-        "   - Disqualify empty, garbage, or invalid titles.\n\n"
+        "2. Role Match (PRIMARY FILTER) — be deterministic and robust to noise:\n"
+        "   - Judge ONLY the candidate's JOB TITLE/headline against the target roles. IGNORE any unrelated news, company description, or context noise.\n"
+        "   - ALWAYS set is_role_match=TRUE for clear decision-maker/executive titles even if the wording is noisy, e.g.: "
+        "Director/Directora, CIO, CTO, CEO, CFO, COO, CMO, CISO, Chief (any C-level), VP/Vicepresidente, Head of, Gerente, Manager, Jefe, "
+        "Líder/Lead, Presidente, Founder/Fundador, Owner/Socio, and any title containing the requested target roles.\n"
+        "   - Set is_role_match=FALSE ONLY if the title is empty/garbage, is clearly a non-decision role (intern, becario, pasante, asistente, auxiliar, estudiante), "
+        "or belongs to an unrelated department (HR/RRHH, marketing, design) that does not match the target roles.\n"
+        "   - When in doubt about a senior-sounding title, set is_role_match=TRUE.\n\n"
         
         "OUTPUT FORMAT:\n"
         "You MUST respond with a valid JSON object matching this schema exactly:\n"
@@ -655,11 +755,20 @@ async def scrape_linkedin_targets(company_name: str) -> list[dict]:
             logger.error(f"Apify execution failure, using fallback: {e}")
             output_leads = await fallback_tavily_search(search_company, target_roles, original_company_name=company_name)
 
+    # AUDITORÍA (dedup): unificar clones por (nombre + empresa) ANTES de gastar
+    # tokens del LLM. Corrige duplicados tipo 'Fidel Vargas' vs 'Fidel Vargas Londoño'
+    # y basura de parsing tipo 'Carlos Alberto Alberto'.
+    output_leads = deduplicate_leads(output_leads)
+
     # relevance slice to top 8 to improve decision-maker recall while keeping enrichment cost bounded
     final_leads = output_leads[:8]
     
     # Run adaptive, industry-agnostic LLM pre-flight validation on the candidates
     final_leads = await validate_leads_with_llm(search_company, target_roles, final_leads)
+
+    # Segunda pasada de dedup: tras la limpieza de nombres del LLM pueden quedar
+    # clones idénticos; los unificamos antes de enriquecer y persistir.
+    final_leads = deduplicate_leads(final_leads)
 
     # Cascade B2B Enrichment (only for non-disqualified leads)
     # AUDITORÍA #6: se registra el ORIGEN del email y si está verificado, para no

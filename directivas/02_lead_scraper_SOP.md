@@ -53,3 +53,10 @@
 - Mayor recall de decisores: `resultsPerPage` subido a 5, tope por rol a 3, y slice a los top-8 candidatos.
 - Cada lead persiste el **origen del email**: `email_source` ∈ {`apollo`, `hunter`, `pattern_inferred`} y `email_verified` (true solo con Apollo/Hunter). El patrón determinista `nombre.apellido@dominio` queda marcado como **no verificado** para evitar rebotes.
 - Modelo Groq configurable por entorno (`GROQ_MODEL_REASONING`). Ver `directivas/09_lead_scoring_engine_SOP.md`.
+
+
+
+## Addendum v3.12.1 — Deduplicación estricta pre-scoring (fix)
+- `deduplicate_leads()` unifica clones por **(nombre normalizado + empresa)** ANTES de la validación LLM (ahorra tokens) y de nuevo antes de enriquecer/persistir.
+- Cubre: clones idénticos (`Esteban Sánchez`), apellido parcial vs completo (`Fidel Vargas` ⊆ `Fidel Vargas Londoño`, se conserva el más completo y se fusiona el email) y basura de parsing (`Carlos Alberto Alberto` → `Carlos Alberto` vía `_clean_name`).
+- El prompt de validación de roles ahora reconoce explícitamente cargos decisores (Director, CIO/CTO/CxO, VP, Gerente, Head) y solo descarta roles claramente no decisores, evitando el falso "Nombre de Cargo Inválido".
