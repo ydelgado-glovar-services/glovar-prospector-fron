@@ -107,7 +107,12 @@ def extract_strategic_intent(form_data: dict) -> dict:
         "5. 'target_market_region': The normalized geographic region where the client operates "
         "(e.g., 'Colombia', 'LATAM', 'United States').\n"
         "6. 'anti_profile_constraints': A string containing specific exclusion directives based on your ontological analysis "
-        "(e.g., 'EXCLUDE any company that provides transportation, logistics, 3PL, 4PL, or freight forwarding services')."
+        "(e.g., 'EXCLUDE any company that provides transportation, logistics, 3PL, 4PL, or freight forwarding services').\n"
+        "CRITICAL RULE: The Anti-Profile MUST NEVER include the target industry. If the target industry is Banks and Insurance, "
+        "DO NOT exclude banks. The Anti-Profile is STRICTLY for direct competitors of the sending company "
+        "(e.g. other IT consultants, RPA agencies), not the target clients. "
+        f"Before finalizing, verify that 'anti_profile_constraints' does NOT exclude the target industry ('{form_data.get('sector', '')}'); "
+        "if it does, remove that exclusion. When no clear competitor profile exists, return an empty string."
     )
     
     user_prompt = f"""

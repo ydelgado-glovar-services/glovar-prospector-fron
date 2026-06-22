@@ -44,3 +44,9 @@
 - **Slider conectado:** el cap de empresas a procesar = `limite_perfiles` (5–25). Antes estaba fijo en 20 y el slider no surtía efecto.
 - **Modelo configurable:** `GROQ_MODEL_REASONING` / `GROQ_MODEL_FAST` por entorno (default Llama-4-Scout).
 - Ver `directivas/09_lead_scoring_engine_SOP.md`.
+
+
+
+## Addendum v3.12.2 — Anti-perfil no debe incluir la industria objetivo (fix Fase 0)
+- Bug: el Intent Parser (Fase 0) a veces metía la **industria objetivo** dentro de `anti_profile_constraints` (p. ej. "Exclude banks or insurance"), provocando que `validator.py` descartara a todos los clientes válidos (bancos).
+- Fix: el `system_prompt` de `extract_strategic_intent` incluye una **CRITICAL RULE** explícita: el anti-perfil es STRICTAMENTE para competidores directos de la empresa remitente (otras consultoras IT, agencias RPA, etc.), **NUNCA** la industria objetivo. Se añade una verificación final que exige no excluir el sector objetivo y devolver string vacío si no hay un competidor claro.
