@@ -202,6 +202,23 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
             </div>
 
             <div className="flex flex-col gap-2">
+              <Label htmlFor="mercado_objetivo" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Mercado objetivo / expansión (opcional)
+              </Label>
+              <Input
+                id="mercado_objetivo"
+                name="mercado_objetivo"
+                placeholder="Ej: Colombia"
+                value={values.mercado_objetivo || ""}
+                onChange={(event) => handleFieldChange({ mercado_objetivo: event.target.value })}
+                disabled={isLoading}
+              />
+              <span className="text-[10px] text-muted-foreground mt-0.5">
+                Úsalo para buscar empresas con sede en el <strong>País</strong> que se expanden u operan en este mercado (ej. País: Estados Unidos → Mercado: Colombia).
+              </span>
+            </div>
+
+            <div className="flex flex-col gap-2">
               <Label htmlFor="tamano_empresa" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Tamaño de empresa
               </Label>

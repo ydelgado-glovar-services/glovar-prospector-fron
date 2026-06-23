@@ -74,6 +74,7 @@ class ProspectRequest(BaseModel):
     mi_empresa: str
     sector: str
     pais: str
+    mercado_objetivo: Optional[str] = ""
     tamano_empresa: str
     cargo_decision: str
     dolor_cliente: str

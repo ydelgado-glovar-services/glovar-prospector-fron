@@ -19,7 +19,7 @@ import groq
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-from scripts.scoring import compute_composite, account_qualifies, disqualified_scores
+from scripts.scoring import compute_composite, account_qualifies, disqualified_scores, deterministic_role_fit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -171,6 +171,22 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
     target_industry_core = extracted_intent.get("target_industry_core", form_context.get("sector", "su sector"))
     requested_size = form_context.get("tamano_empresa", "")
     target_region = extracted_intent.get("target_market_region", form_context.get("pais", ""))
+    hq_region = extracted_intent.get("discovery_hq_region", form_context.get("pais", ""))
+    is_expansion_play = bool((target_region or "").strip()) and (target_region or "").strip().lower() != (hq_region or "").strip().lower()
+
+    # Directiva geográfica: en un "expansion play" (sede en un país, expansión a otro)
+    # el fit geográfico NO depende de la sede sino de tener/abrir presencia en el
+    # mercado de expansión; la sede extranjera es esperada y NO debe penalizarse.
+    if is_expansion_play:
+        geo_directive = (
+            f"GEOGRAPHIC FIT (expansion play): the company is expected to be headquartered in '{hq_region}'. "
+            f"What matters is whether it HAS, or shows concrete signals of OPENING/EXPANDING, operations in the "
+            f"target market '{target_region}'. Reward real presence/expansion signals in '{target_region}'; "
+            f"do NOT penalize the foreign HQ. A company in '{hq_region}' with NO link to '{target_region}' is a WEAK "
+            f"geographic fit for this client."
+        )
+    else:
+        geo_directive = f"GEOGRAPHIC FIT: the company should operate in '{target_region}'."
 
     trigger_state = (
         "There IS candidate recent news in the context below; evaluate its real strength."
@@ -185,15 +201,23 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
         "Score two independent dimensions from 0 to 100:\n"
         "1) fit_score: how well the TARGET COMPANY matches the client's Ideal Customer Profile — "
         f"industry/sub-niche ('{target_industry_core}'), requested employee size band ('{requested_size}'), "
-        f"geography ('{target_region}'), and relevance to the client's operational pain. "
-        "Penalize companies clearly outside the requested size band (set size_match=false and lower fit_score).\n"
+        "geography (per the directive below), and relevance to the client's operational pain. "
+        f"{geo_directive} "
+        "SIZE RULE: size bands written as 'N+' (e.g. '500+') are a MINIMUM (N or more): a company with 5,000 or "
+        "50,000 employees FULLY satisfies '500+'. NEVER penalize a company for being LARGER than the floor. "
+        "Set size_match=false (and lower fit_score) ONLY if the company is clearly BELOW the requested floor.\n"
         "2) intent_score: strength and recency of a real buying trigger (funding, expansion, new products, "
         "regulatory shifts, hiring) found in the provided news. If there is no real recent trigger, set it to 0.\n\n"
         f"TRIGGER STATE: {trigger_state}\n\n"
-        "CRITICAL ANTI-PROFILE CHECK: "
-        f"Apply strictly: '{anti_profile_constraints}'. "
-        "If the target company semantically matches the anti-profile (a direct competitor of the sending company), "
-        "set fit_score below 20 and is_company_approved=false, stating it belongs to the client's Anti-Profile.\n\n"
+        "CRITICAL ANTI-PROFILE CHECK (do NOT over-apply): "
+        f"Apply this anti-profile strictly but narrowly: '{anti_profile_constraints}'. "
+        "A target is an Anti-Profile ONLY if its PRIMARY/core business is the SAME service the sending company sells "
+        "(i.e. a true direct competitor). "
+        f"Operating in the target client industry ('{target_industry_core}') makes a company a CLIENT, NOT a competitor — "
+        "you MUST NOT reject it as anti-profile for that reason, and you MUST NOT infer competitor status merely because "
+        "it might run internal operations (e.g. a CRO that handles some of its own logistics is still a CLIENT, not a "
+        "logistics competitor). Only when a company is a genuine direct competitor, set fit_score below 20 and "
+        "is_company_approved=false, stating it belongs to the client's Anti-Profile.\n\n"
         "APPROVAL RULE (fit-first): set is_company_approved=true if the account is a genuine ICP match "
         "(strong fit), EVEN IF intent_score is low. Reject only anti-profiles or low-fit/irrelevant companies. "
         f"When approving, connect the reasoning to the client's pain framework: '{pain_framework}'. "
@@ -586,6 +610,13 @@ def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
             role_fit = lead_eval.get("role_fit_score", 70 if is_approved else 0)
         else:
             logger.warning(f"No batch LLM evaluation found for lead: {full_name}. Defaulting to rejected.")
+
+        # PISO DETERMINISTA de role_fit (Issue 2): un cargo decisor reconocido
+        # (Director, CIO/CTO/CxO, VP, Gerente, Head...) nunca queda por debajo de su
+        # piso por reglas, sin importar el ruido del contexto o de la noticia.
+        target_roles_ctx = [r.strip() for r in (form_context.get("cargo_decision", "") or "").split(",") if r.strip()]
+        rule_role_fit = deterministic_role_fit(title, target_roles_ctx)
+        role_fit = max(int(role_fit or 0), rule_role_fit)
 
         try:
             if lead.get("is_human_fallback") and is_approved:

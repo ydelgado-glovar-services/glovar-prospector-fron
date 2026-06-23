@@ -19,6 +19,70 @@ calcula de forma DETERMINISTA aquí (más confiable que pedirle el 0–100 final
 """
 
 from typing import Optional
+import re as _re
+import unicodedata as _ud
+
+
+def _strip_accents(s: str) -> str:
+    return "".join(c for c in _ud.normalize("NFD", s or "") if _ud.category(c) != "Mn")
+
+
+# Acrónimos C-level/VP: se evalúan como PALABRA COMPLETA (token), no substring,
+# para no caer en falsos positivos (p. ej. 'cto' dentro de 'direCTOr', 'cio' en 'negoCIO').
+_ACRONYM_SCORES = {
+    "ceo": 95, "cto": 95, "cio": 95, "cfo": 95, "coo": 95, "cmo": 95,
+    "ciso": 95, "cdo": 95, "cao": 95, "cro": 95,
+    "vp": 88, "svp": 88, "evp": 88,
+}
+
+# Frases/palabras largas: se evalúan por substring (seguro por longitud).
+_PHRASE_TIERS = [
+    (95, ["chief", "founder", "fundador", "co-founder", "cofundador", "owner",
+          "propietario", "presidente", "president", "managing director", "socio director"]),
+    (88, ["vicepresident", "vice president", "vicepresidente"]),
+    (82, ["director", "directora", "head of", "jefe de", "jefa de",
+          "gerente general", "general manager", "country manager"]),
+    (68, ["gerente", "manager", "lider", "responsable de", "jefe",
+          "principal", "senior manager"]),
+    (55, ["coordinador", "coordinadora", "supervisor", "especialista", "specialist", "senior"]),
+]
+
+_ROLE_DISQUALIFIERS = [
+    "intern", "internship", "becario", "pasante", "practicante", "trainee",
+    "assistant", "asistente", "auxiliar", "student", "estudiante", "recepcion",
+]
+
+
+def deterministic_role_fit(title: str, target_roles=None) -> int:
+    """role_fit (0-100) REPRODUCIBLE por reglas, robusto al ruido del LLM.
+    Acrónimos por palabra completa; frases largas por substring; bono por
+    coincidencia (token-a-token) con los cargos objetivo del cliente."""
+    if not title:
+        return 0
+    t = _strip_accents(title).lower()
+    tokens = set(_re.findall(r"[a-z0-9]+", t))
+
+    if any(d in t for d in _ROLE_DISQUALIFIERS):
+        return 15
+
+    score = 0
+    for tok, sc in _ACRONYM_SCORES.items():
+        if tok in tokens:
+            score = max(score, sc)
+    for tier_score, phrases in _PHRASE_TIERS:
+        if any(p in t for p in phrases):
+            score = max(score, tier_score)
+
+    # Bono por coincidencia con los cargos objetivo (token-a-token, no substring).
+    if target_roles:
+        for role in target_roles:
+            role_tokens = [tok for tok in _re.findall(r"[a-z0-9]+", _strip_accents(str(role)).lower()) if len(tok) >= 3]
+            if role_tokens and all(tok in tokens for tok in role_tokens):
+                score = max(score, 80)
+
+    return score
+
+
 
 # ── Pesos del score compuesto ───────────────────────────────────────────────────
 # Con contacto identificado (lead individual):

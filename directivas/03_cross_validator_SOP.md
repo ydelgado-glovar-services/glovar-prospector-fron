@@ -80,3 +80,11 @@ La calificación de leads opera bajo un modelo de tres estados, implementado de 
 - Fase 2 asigna `role_fit_score` por contacto y no inventa noticias cuando la calificación es por fit.
 - **Determinismo:** `temperature=0.1` en todas las llamadas de calificación (Fase 1 y 2).
 - Detalle completo y fórmulas en `directivas/09_lead_scoring_engine_SOP.md`.
+
+
+
+## Addendum v3.12.3 — Anti-perfil no debe descartar la industria objetivo + tamaño "N+" (fix de calibración)
+- **Bug observado (Elite Logística):** el validador descartaba CROs (Parexel, IQVIA, ICON…) como "competidor/anti-perfil" mientras aprobaba otro CRO idéntico (PPD) → inconsistencia. Causa: la Fase 0 contaminaba `target_industry_core` con el servicio del remitente ("...Logistics") y la Fase 1 sobre-aplicaba el anti-perfil.
+- **Fix Fase 1 (anti-perfil):** una empresa es anti-perfil SOLO si su negocio CENTRAL es el mismo servicio que vende el remitente (competidor directo real). Operar en la industria objetivo = CLIENTE, nunca competidor; prohibido inferir competencia por tener operaciones internas (un CRO con logística interna sigue siendo cliente).
+- **Fix Fase 1 (tamaño):** las bandas "N+" (ej. "500+") son un PISO; una empresa de 10.000 empleados cumple "500+". Solo se penaliza si está claramente POR DEBAJO del piso.
+- **Fix Fase 0 (`main.py`):** `target_industry_core` describe la industria del CLIENTE, nunca el servicio del remitente (usar "Clinical Research & Biopharma", no "Biopharma Logistics").

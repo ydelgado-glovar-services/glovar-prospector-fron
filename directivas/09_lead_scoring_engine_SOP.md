@@ -51,3 +51,9 @@ Columnas nuevas (migración 002): `fit_score`, `intent_score`, `role_fit_score`,
 
 ## 7. Acción requerida
 Ejecutar la migración `db/migrations/002_lead_scoring_and_email_verification.sql` en Supabase antes de la primera corrida con esta versión.
+
+
+
+## Addendum v3.12.1 — role_fit determinista (fix)
+- `scripts/scoring.py` incorpora `deterministic_role_fit(title, target_roles)`: rúbrica por reglas (acrónimos C-level/VP por palabra completa; frases como Director/Gerente/Head por substring; bono token-a-token por coincidencia con los cargos objetivo; penalización a intern/becario/asistente).
+- En la Fase 2 del validador el `role_fit` final = `max(role_fit_LLM, deterministic_role_fit(...))`. Así un cargo decisor reconocido (Director, CIO, CTO) **nunca** queda en 0 por ruido del contexto/noticia, eliminando la inconsistencia (72 vs 0) entre evaluaciones del mismo perfil.
