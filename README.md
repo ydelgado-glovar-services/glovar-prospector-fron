@@ -1,6 +1,12 @@
 # GLOVAR PROSPECTOR — ARQUITECTURA TÉCNICA Y MANUAL DE OPERACIÓN
-**Versión de Producción:** `3.12.0`  
+**Versión de Producción:** `3.13.0`  
 **Autoría:** Glovar Services & Antigravity AI  
+
+> **Changelog 3.13.0 — Dos modos de prospección + UX simplificada**
+> - **⚡ Modo Rápido (Express):** lista de contactos en segundos (sin noticias). Proveedor intercambiable Apollo → fallback Tavily+Hunter. Endpoint síncrono `POST /api/v1/prospect/fast`. Ver `directivas/10_fast_mode_SOP.md`.
+> - **UX estilo Enginy:** input en lenguaje natural ("Describe tu cliente ideal") + toggle de modo; en Modo Rápido los campos profundos quedan ocultos/opcionales.
+> - **🔍 Modo Profundo:** el pipeline de señales/noticias existente, intacto.
+> - Nuevo `scripts/fast_search.py` + `compute_fast_match` (scoring sin intent).
 
 > **Changelog 3.12.0 — Motor de Scoring ICP (Fit + Intent)**
 > - **Calificación FIT-FIRST:** se deja de descartar empresas por falta de noticias. Se puntúa FIT (ICP) e INTENT (trigger) 0–100; alto fit sin trigger sigue calificado (nurture). Ver `directivas/09_lead_scoring_engine_SOP.md`.
