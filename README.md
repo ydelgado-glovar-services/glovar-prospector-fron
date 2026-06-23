@@ -1,6 +1,12 @@
 # GLOVAR PROSPECTOR — ARQUITECTURA TÉCNICA Y MANUAL DE OPERACIÓN
-**Versión de Producción:** `3.13.0`  
+**Versión de Producción:** `3.14.0`  
 **Autoría:** Glovar Services & Antigravity AI  
+
+> **Changelog 3.14.0 — Aislamiento por job + calidad de datos (data-quality hardening)**
+> - **🔒 Aislamiento de corridas por `job_id`:** todos los artefactos temporales viven ahora bajo `.tmp/job_{job_id}/` (nuevo `scripts/runtime_paths.py`). Antes el contexto era un archivo global (`.tmp/active_runtime_context.json`) y el staging por empresa, por lo que **dos corridas concurrentes/sucesivas se pisaban** y una búsqueda podía heredar el ICP de otra (causa raíz de resultados cruzados). Cada job queda 100% aislado.
+> - **📧 Dominios de email confiables (anti-rebote):** `get_company_domain` ahora **verifica que el dominio pertenezca a la empresa** (`_domain_matches_company`) y amplía la blacklist de data-brokers/portales (ZoomInfo, LeadIQ, RocketReach, EMIS, Crunchbase, etc.). Si no hay dominio confiable, **NO se infiere email** en lugar de generar una dirección que rebota. Resuelve falsos positivos del autocompletado difuso (`TP`→tp-link.com, `X`→x.com) sin descartar acrónimos legítimos (`SLB`→slb.com).
+> - **⚡ Modo Rápido — geografía y cargos:** post-filtro geográfico real por país (Tavily no filtra duro; antes colaban perfiles de otros países) con respaldo si queda vacío, y limpieza de nombre/cargo (recorta headlines de marketing de LinkedIn y separa cargos pegados al nombre).
+> - **🌎 Geo-fit estricto en Modo Profundo:** la auditoría de cuenta exige presencia real en el mercado objetivo, evitando colar filiales/marcas homónimas extranjeras sin operación local.
 
 > **Changelog 3.13.0 — Dos modos de prospección + UX simplificada**
 > - **⚡ Modo Rápido (Express):** lista de contactos en segundos (sin noticias). Proveedor intercambiable Apollo → fallback Tavily+Hunter. Endpoint síncrono `POST /api/v1/prospect/fast`. Ver `directivas/10_fast_mode_SOP.md`.
@@ -160,16 +166,18 @@ El pipeline de prospección asíncrono se compone de cuatro scripts en Python qu
  ├────────────────────────────────────────────────────────┤
  │                                                        │
  │  1. scripts/news_scraper.py (Fase 1: Cognitive Plan)    │
- │     └─ Escribe: .tmp/news_{company}.json               │
+ │     └─ Escribe: .tmp/job_{job_id}/news_{company}.json   │
  │                                                        │
  │  2. scripts/lead_scraper.py (LinkedIn + Hunter)        │
- │     └─ Escribe: .tmp/leads_{company}.json              │
+ │     └─ Escribe: .tmp/job_{job_id}/leads_{company}.json  │
  │                                                        │
  │  3. scripts/validator.py (Fase 2: RAG & Persistence)   │
  │     └─ Guarda directo en Supabase DB                   │
  │                                                        │
  └────────────────────────────────────────────────────────┘
 ```
+
+> **Aislamiento por `job_id` (`scripts/runtime_paths.py`):** el manifiesto cognitivo y todos los archivos de staging se escriben/leen bajo `.tmp/job_{job_id}/`, de modo que corridas concurrentes o consecutivas nunca comparten estado en disco.
 
 ---
 
@@ -187,14 +195,14 @@ Es el punto de entrada de la ejecución asíncrona. Maneja la orquestación sem�
         *   `b2b_buying_trigger_context`: Traducciòn explícita del detonante del dolor de compra.
         *   `rigorous_pain_framework`: Marco académico del fallo operacional del prospecto.
         *   `target_market_region`: Normalización geográfica del mercado objetivo.
-        *   Este manifiesto se almacena de inmediato en `.tmp/active_runtime_context.json` bajo la clave `"extracted_intent"`.
+        *   Este manifiesto se almacena de inmediato en `.tmp/job_{job_id}/active_runtime_context.json` bajo la clave `"extracted_intent"` (ruta aislada por job, ver `scripts/runtime_paths.py`).
     2.  **Company Discovery:** Utiliza `Tavily Search API` inyectando los tokens cognitivos calculados para descubrir entre 15 y 20 empresas reales del perfil objetivo en la geografía indicada.
     3.  **Filtro de Lista de Exclusión (Blacklist):** Realiza un filtrado primario cruzando la lista con la propiedad `exclusion_list` provista por el payload del usuario.
     4.  **Ejecución Multihilo Concurrente (`ThreadPoolExecutor`):** Inicializa 3 hilos de trabajo paralelos. Para cada empresa limpia de la lista, ejecuta secuencialmente las llamadas internas de `news_scraper`, `lead_scraper` y `validator`.
     5.  **Control de Idempotencia por Supabase:** Antes de procesar una empresa del lote, consulta la tabla `leads` en Supabase. Si la empresa ya cuenta con registros para ese `job_id`, salta el análisis de inmediato, mitigando el sobreconsumo de créditos de API en caso de reanudaciones tras reinicios inesperados.
     6.  **Piping de Estado:** Invoca el endpoint `/api/v1/internal/update-job/{job_id}` del backend para actualizar la fase actual y el porcentaje de progreso (10% a 100%) visible en el dashboard.
 *   **Salidas:**
-    *   Archivos de intercambio temporal en `.tmp/` (`news_{company}.json` y `leads_{company}.json`).
+    *   Archivos de intercambio temporal **aislados por job** en `.tmp/job_{job_id}/` (`news_{company}.json` y `leads_{company}.json`).
     *   Orquestación de la persistencia directa en base de datos.
     *   Limpieza segura de los archivos staging locales al culminar.
 
@@ -205,7 +213,7 @@ Localiza hitos de crecimiento recientes y críticos (2025/2026) que justifiquen 
 
 *   **Entradas:**
     *   Nombre de la empresa objetivo (argumento del módulo).
-    *   Contexto del manifiesto estratégico extraído en la Fase 0 (`.tmp/active_runtime_context.json`).
+    *   Contexto del manifiesto estratégico extraído en la Fase 0 (`.tmp/job_{job_id}/active_runtime_context.json`).
 *   **Proceso Interno:**
     1.  **Fase 1: Cognitive Query Planner:** La IA evalúa la intención comercial y genera secuencialmente 3 consultas de búsqueda súper-dirigidas para la empresa:
         *   *Query de Expansión:* Enfoque en aperturas de sedes, contrataciones o nuevos proyectos.
@@ -229,10 +237,10 @@ Localiza decisores óptimos en LinkedIn y enriquece sus correos y dominios corpo
     2.  **Cortafuegos Determinista (Pre-Validación en Python):** Para cada perfil encontrado, ejecuta validaciones lógicas locales antes de llamar APIs de pago:
         *   **is_valid_human_role:** Elimina perfiles no humanos, robots de indexación o páginas corporativas.
         *   **Mismatch Check:** Compara si el título extraído y el nombre coinciden verdaderamente con la empresa objetivo.
-    3.  **Resolución de Dominio y Hunter.io:** Si el perfil es válido, localiza el dominio B2B de la empresa a través de una consulta ligera de Tavily y utiliza `Hunter.io Email Finder API` con el nombre del lead y el dominio corporativo resuelto para obtener el correo electrónico comercial.
+    3.  **Resolución de Dominio Verificada y Cascada de Enriquecimiento:** Si el perfil es válido, resuelve el dominio B2B oficial (Clearbit → Tavily) y **verifica que el dominio realmente pertenezca a la empresa** (coincidencia de tokens del nombre vs. raíz del dominio) descartando data-brokers/portales (ZoomInfo, LeadIQ, EMIS, etc.). Con el dominio confiable enriquece el correo en cascada **Apollo → Hunter.io** (verificados) y, solo como último recurso, un patrón determinista (`nombre.apellido@dominio`) marcado como **inferido (no verificado)**. Si no hay dominio confiable, el lead queda **sin email** para evitar rebotes.
     4.  **Fallback de Prospección Manual (Contacto Pendiente):** Si la empresa tiene un trigger comercialmente válido pero no fue posible localizar un decisor por LinkedIn de forma automatizada, crea un registro clasificado como `Contacto Pendiente` con cargo `Prospección Manual Pendiente` e email `None`, permitiendo que el cliente en el frontend asigne el perfil de forma manual en lugar de perder la cuenta.
 *   **Salidas:**
-    *   Escribe `.tmp/leads_{company}.json` con el listado de leads enriquecidos, estatus de validez y dominios.
+    *   Escribe `.tmp/job_{job_id}/leads_{company}.json` con el listado de leads enriquecidos, estatus de validez, dominios y la procedencia del email (`email_source`: `apollo`/`hunter`/`pattern_inferred`) con su bandera `email_verified`.
 
 ---
 
@@ -242,7 +250,7 @@ Lleva a cabo la auditoría cruzada conceptual definitiva y redacta los correos d
 *   **Entradas:**
     *   Nombre de la empresa.
     *   UUID del usuario y UUID del Job.
-    *   Archivos temporales `.tmp/news_{company}.json` y `.tmp/leads_{company}.json`.
+    *   Archivos temporales `.tmp/job_{job_id}/news_{company}.json` y `.tmp/job_{job_id}/leads_{company}.json`.
 *   **Proceso Interno:**
     1.  **Fase 2: Rigorous Pain Framework Integration:** Toma el manifiesto de dolor del runtime context y lo inserta en el prompt de Llama 4 Scout.
     2.  **Cortocircuito de Inferencia:** Si el lead viene marcado como pre-descalificado (por rol inválido o mismatch en `lead_scraper`), escribe directamente en Supabase con `es_calificado = false` en milisegundos, eludiendo la llamada del LLM por completo.
