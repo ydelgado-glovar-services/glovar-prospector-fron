@@ -178,13 +178,19 @@ async def generate_human_search_plan(company_name: str, extracted_intent: dict) 
         }
 
 
-async def fetch_targeted_news(company_name: str) -> list[dict[str, Any]]:
+async def fetch_targeted_news(company_name: str, job_id: str | None = None) -> list[dict[str, Any]]:
     api_key: str = os.getenv("TAVILY_API_KEY", "")
     if not api_key:
         logger.error("Tavily API key not found.")
         return []
 
-    with open(".tmp/active_runtime_context.json", "r") as f:
+    # Contexto aislado por job_id (evita leer el contexto de OTRA corrida).
+    if job_id:
+        from scripts.runtime_paths import context_path
+        ctx_file = context_path(job_id)
+    else:
+        ctx_file = ".tmp/active_runtime_context.json"
+    with open(ctx_file, "r") as f:
         context = json.load(f)
 
     # ── Resolución dinámica de límites de artículos ──
@@ -300,10 +306,16 @@ async def fetch_targeted_news(company_name: str) -> list[dict[str, Any]]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--company", required=True)
+    parser.add_argument("--job_id", required=False, default=None)
     args = parser.parse_args()
 
-    news = asyncio.run(fetch_targeted_news(args.company))
-    os.makedirs(".tmp", exist_ok=True)
-    with open(f".tmp/news_{args.company}.json", "w") as f:
+    news = asyncio.run(fetch_targeted_news(args.company, args.job_id))
+    from scripts.runtime_paths import news_path
+    if args.job_id:
+        out_path = news_path(args.job_id, args.company)
+    else:
+        os.makedirs(".tmp", exist_ok=True)
+        out_path = f".tmp/news_{args.company}.json"
+    with open(out_path, "w") as f:
         json.dump(news, f, indent=2)
     logger.info(f"Successfully cached cognitive news context for {args.company}")

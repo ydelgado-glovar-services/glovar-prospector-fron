@@ -186,7 +186,14 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
             f"geographic fit for this client."
         )
     else:
-        geo_directive = f"GEOGRAPHIC FIT: the company should operate in '{target_region}'."
+        geo_directive = (
+            f"GEOGRAPHIC FIT (strict): the company MUST have real, active operations in '{target_region}' "
+            f"(a local subsidiary, offices, or a clearly national operation). A foreign/global brand with "
+            f"the SAME name but whose operation lives in ANOTHER country (e.g. a Spain- or Bulgaria-based bank, "
+            f"or a '.es'/'.bg' entity) is a WEAK/INVALID geographic fit unless it demonstrably operates in "
+            f"'{target_region}'. If the target is clearly a foreign entity without local presence in "
+            f"'{target_region}', set size_match irrelevant, lower fit_score below 30 and is_company_approved=false."
+        )
 
     trigger_state = (
         "There IS candidate recent news in the context below; evaluate its real strength."
@@ -281,12 +288,13 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
 
 
 def validate_and_persist(company_name: str, user_id: str, job_id: str) -> None:
-    with open(f".tmp/news_{company_name}.json", "r") as f:
+    from scripts.runtime_paths import context_path, news_path, leads_path
+    with open(news_path(job_id, company_name), "r") as f:
         news_data = json.load(f)
-    with open(f".tmp/leads_{company_name}.json", "r") as f:
+    with open(leads_path(job_id, company_name), "r") as f:
         leads_data = json.load(f)
-        
-    with open(".tmp/active_runtime_context.json", "r") as f:
+
+    with open(context_path(job_id), "r") as f:
         form_context = json.load(f)
 
     supabase: Client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""))

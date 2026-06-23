@@ -296,9 +296,110 @@ async def validate_leads_with_llm(company_name: str, target_roles: list[str], le
     return leads
 
 
+# ── Resolución de dominio corporativo (hardening anti-emails basura) ─────────────
+# Data-brokers, directorios, redes y portales que NO son el sitio oficial de una
+# empresa. Si la resolución cae en uno de estos, el email inferido rebota seguro
+# (ej. leadiq.com, zoominfo.com, emis.com vistos en las pruebas).
+_DOMAIN_BLACKLIST = [
+    # Redes sociales y plataformas
+    "instagram.com", "facebook.com", "linkedin.com", "twitter.com", "x.com",
+    "youtube.com", "wikipedia.org", "pinterest.com", "tiktok.com", "github.com",
+    "medium.com", "glassdoor.com", "indeed.com", "computrabajo.com",
+    # Data-brokers / agregadores B2B (origen de los emails basura en las pruebas)
+    "zoominfo.com", "leadiq.com", "rocketreach.co", "rocketreach.com", "lusha.com",
+    "signalhire.com", "contactout.com", "apollo.io", "hunter.io", "clearbit.com",
+    "crunchbase.com", "emis.com", "kompass.com", "dnb.com", "owler.com",
+    "b2bmarketplace.procolombia.co", "procolombia.co", "einforma.com", "infoempresa.com",
+    "universidadperu.com", "datacreditos.com", "griinstitute.org",
+    # Prensa / portales de noticias
+    "portafolio.co", "larepublica.co", "techcrunch.com", "dinero.com",
+    "informacolombia.com", "elremate.com", "las2orillas.co", "valoraanalitik.com",
+    "bloomberg.com", "elespectador.com", "eltiempo.com", "semana.com",
+    "apify.com", "tavily.com",
+    # Emails personales/públicos (nunca son dominio corporativo)
+    "gmail.com", "hotmail.com", "yahoo.com", "outlook.com", "icloud.com", "live.com",
+]
+
+# Sufijos legales y palabras genéricas que NO ayudan a identificar el dominio.
+_LEGAL_STOPWORDS = {
+    "sas", "sa", "sac", "ltda", "ltd", "llc", "inc", "corp", "corporation", "co",
+    "company", "group", "grupo", "holding", "holdings", "plc", "gmbh", "srl",
+    "the", "de", "del", "la", "el", "los", "las", "y", "and", "of", "services",
+    "servicios", "solutions", "soluciones", "global", "international", "internacional",
+}
+
+
+def _norm_alnum(s: str) -> str:
+    import unicodedata
+    s = "".join(c for c in unicodedata.normalize("NFD", s or "") if unicodedata.category(c) != "Mn")
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def _company_tokens(name: str) -> list[str]:
+    """Tokens significativos del nombre (sin sufijos legales ni palabras genéricas)."""
+    import unicodedata, re as _re
+    s = "".join(c for c in unicodedata.normalize("NFD", name or "") if unicodedata.category(c) != "Mn")
+    toks = [t.lower() for t in _re.findall(r"[A-Za-z0-9]+", s)]
+    return [t for t in toks if t not in _LEGAL_STOPWORDS and len(t) >= 2]
+
+
+def _domain_root(domain: str) -> str:
+    """Etiqueta registrable aproximada del dominio, normalizada a alfanumérico.
+    'www.bancodebogota.com.co' -> 'bancodebogota'; 'tp-link.com' -> 'tplink'."""
+    d = (domain or "").lower().strip()
+    if d.startswith("www."):
+        d = d[4:]
+    labels = [l for l in d.split(".") if l]
+    if not labels:
+        return ""
+    # TLDs compuestos comunes (com.co, gob.cl, com.mx, co.uk...).
+    multi_tld = {"com", "co", "org", "net", "gob", "gov", "edu", "ac"}
+    if len(labels) >= 3 and labels[-2] in multi_tld:
+        root = labels[-3]
+    elif len(labels) >= 2:
+        root = labels[-2]
+    else:
+        root = labels[0]
+    return _norm_alnum(root)
+
+
+def _domain_matches_company(domain: str, company_name: str) -> bool:
+    """Verifica que el dominio resuelto pertenezca PLAUSIBLEMENTE a la empresa.
+    Evita los falsos positivos del autocompletado difuso (p. ej. 'TP' -> tp-link.com,
+    'X' -> x.com) sin descartar acrónimos legítimos cortos ('SLB' -> slb.com)."""
+    root = _domain_root(domain)
+    if not root:
+        return False
+    tokens = _company_tokens(company_name)
+    if not tokens:
+        return False
+    concat = "".join(tokens)
+    # 1) Coincidencia exacta de la raíz con la concatenación (cubre acrónimos cortos
+    #    legítimos como 'SLB' -> slb.com, 'IQVIA' -> iqvia.com).
+    if root == concat:
+        return True
+    # 2) Un token relevante (>=4) contenido en la raíz del dominio.
+    for t in tokens:
+        if len(t) >= 4 and t in root:
+            return True
+    # 3) Substring en cualquier dirección, exigiendo longitud >=4 en AMBOS lados
+    #    (evita que 'tp' haga match con 'tplink').
+    if len(root) >= 4 and len(concat) >= 4 and (root in concat or concat in root):
+        return True
+    # 4) Acrónimo de las iniciales (>=2 tokens) == raíz del dominio.
+    if len(tokens) >= 2:
+        acronym = "".join(t[0] for t in tokens)
+        if len(acronym) >= 2 and acronym == root:
+            return True
+    return False
+
+
 def get_company_domain(company_name: str) -> str:
-    """Dynamically finds the official company homepage domain using Clearbit Suggestion API, Tavily Search API, or fallback heuristic."""
-    # 1. Intentar con Clearbit Autocomplete API (Gratuito, rápido y extremadamente preciso)
+    """Resuelve el dominio corporativo oficial (Clearbit → Tavily → heurística),
+    VERIFICANDO que el dominio realmente pertenezca a la empresa antes de aceptarlo.
+    Devuelve "" si no se puede resolver con confianza (mejor sin email que con uno
+    que rebota a un data-broker)."""
+    # 1. Clearbit Autocomplete (rápido y preciso) — con verificación de pertenencia.
     logger.info(f"Trying Clearbit Autocomplete domain lookup for: {company_name}...")
     try:
         with httpx.Client(timeout=8.0) as client:
@@ -309,61 +410,58 @@ def get_company_domain(company_name: str) -> str:
             if response.status_code == 200:
                 suggestions = response.json()
                 if suggestions and isinstance(suggestions, list):
-                    best_match = suggestions[0]
-                    domain = best_match.get("domain")
-                    if domain:
-                        logger.info(f"✅ Clearbit Autocomplete resolved domain: {domain}")
-                        return domain
+                    for best_match in suggestions[:3]:
+                        domain = (best_match.get("domain") or "").lower()
+                        if not domain:
+                            continue
+                        if any(bad in domain for bad in _DOMAIN_BLACKLIST):
+                            continue
+                        if _domain_matches_company(domain, company_name):
+                            logger.info(f"✅ Clearbit resolved & verified domain: {domain}")
+                            return domain
+                        else:
+                            logger.info(f"Clearbit suggestion '{domain}' rejected (no coincide con '{company_name}').")
     except Exception as e:
         logger.debug(f"Clearbit Autocomplete lookup failed/skipped: {e}")
 
-    # 2. Fallback a Tavily Search con sanitización estricta de dominios
+    # 2. Fallback a Tavily Search con sanitización + verificación de pertenencia.
     tavily_key = os.getenv("TAVILY_API_KEY", "")
     if not tavily_key:
-        fallback = f"{company_name.lower().replace(' ', '')}.com"
-        logger.info(f"TAVILY_API_KEY not found. Fallback domain heuristic: {fallback}")
-        return fallback
-        
+        logger.info(f"TAVILY_API_KEY not found and Clearbit unverified for '{company_name}'. No domain resolved.")
+        return ""
+
     query = f"{company_name} official website domain homepage"
     logger.info(f"Searching Tavily to resolve official domain for {company_name}...")
     try:
         with httpx.Client(timeout=15.0) as client:
             response = client.post(
                 "https://api.tavily.com/search",
-                json={"api_key": tavily_key, "query": query, "max_results": 3}
+                json={"api_key": tavily_key, "query": query, "max_results": 5}
             )
             if response.status_code == 200:
                 results = response.json().get("results", [])
-                
-                # Lista negra extendida de directorios, redes y portales de noticias para evitar falsos positivos
-                blacklist_domains = [
-                    "instagram.com", "facebook.com", "linkedin.com", "twitter.com", "youtube.com", 
-                    "wikipedia.org", "pinterest.com", "tiktok.com", "github.com", "medium.com",
-                    "portafolio.co", "larepublica.co", "techcrunch.com", "dinero.com", 
-                    "informacolombia.com", "computrabajo.com", "elremate.com", "las2orillas.co", 
-                    "valoraanalitik.com", "bloomberg.com", "elespectador.com", "eltiempo.com", 
-                    "semana.com", "apify.com", "tavily.com", "clearbit.com", "crunchbase.com", 
-                    "bloomberg.com", "hunter.io", "apollo.io"
-                ]
-                
+                first_verified = None
                 for r in results:
                     url = r.get("url") or ""
                     domain = urlparse(url).netloc
                     if domain.startswith("www."):
                         domain = domain[4:]
-                    
-                    if any(bad in domain.lower() for bad in blacklist_domains):
-                        logger.info(f"Ignoring blacklisted domain resolved: {domain}")
+                    domain = domain.lower()
+                    if not domain or any(bad in domain for bad in _DOMAIN_BLACKLIST):
                         continue
-                    
-                    logger.info(f"Resolved official domain from search: {domain}")
-                    return domain
+                    if _domain_matches_company(domain, company_name):
+                        logger.info(f"✅ Tavily resolved & verified domain: {domain}")
+                        return domain
+                    if first_verified is None:
+                        first_verified = domain  # candidato no verificado, último recurso
+                if first_verified:
+                    logger.info(f"Tavily domain '{first_verified}' no verificado contra el nombre; se descarta para no inferir email basura.")
     except Exception as e:
         logger.error(f"Error querying Tavily for domain resolution: {e}")
-        
-    fallback = f"{company_name.lower().replace(' ', '')}.com"
-    logger.info(f"Using fallback domain heuristic: {fallback}")
-    return fallback
+
+    # 3. Sin resolución confiable: devolver "" (el llamador NO inferirá email).
+    logger.info(f"No reliable corporate domain resolved for '{company_name}'.")
+    return ""
 
 
 def execute_deterministic_pattern_fallback(full_name: str, domain: str) -> str:
@@ -629,7 +727,7 @@ def clean_company_name_for_search(name: str) -> str:
     logger.info(f"[Company Name Clean] Original: '{name}' -> Cleaned: '{clean}'")
     return clean
 
-async def scrape_linkedin_targets(company_name: str) -> list[dict]:
+async def scrape_linkedin_targets(company_name: str, job_id: str | None = None) -> list[dict]:
     apify_token = os.getenv("APIFY_API_TOKEN", "")
     if not apify_token:
         logger.error("APIFY_API_TOKEN is not defined in the environment.")
@@ -639,7 +737,14 @@ async def scrape_linkedin_targets(company_name: str) -> list[dict]:
     search_company = clean_company_name_for_search(company_name)
         
     try:
-        with open(".tmp/active_runtime_context.json", "r") as f:
+        # Contexto aislado por job_id (evita leer el contexto de OTRA corrida).
+        # Fallback al archivo legacy global solo si no se provee job_id (modo standalone).
+        if job_id:
+            from scripts.runtime_paths import context_path
+            ctx_file = context_path(job_id)
+        else:
+            ctx_file = ".tmp/active_runtime_context.json"
+        with open(ctx_file, "r") as f:
             context = json.load(f)
     except Exception as e:
         logger.error(f"Failed to read runtime context: {e}")
@@ -787,6 +892,15 @@ async def scrape_linkedin_targets(company_name: str) -> list[dict]:
             email_source = None
             email_verified = False
 
+            # Si NO se resolvió un dominio corporativo confiable, NO inferimos email
+            # (mejor sin email que con uno que rebota a un data-broker).
+            if not domain:
+                lead["email"] = None
+                lead["email_source"] = None
+                lead["email_verified"] = False
+                logger.info(f"Sin dominio confiable para '{search_company}'; se omite email de {full_name}.")
+                continue
+
             # 1. Apollo.io (verificado)
             email = enrich_lead_with_apollo(full_name, domain)
             if email:
@@ -816,10 +930,16 @@ async def scrape_linkedin_targets(company_name: str) -> list[dict]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--company", required=True)
+    parser.add_argument("--job_id", required=False, default=None)
     args = parser.parse_args()
     
-    leads = asyncio.run(scrape_linkedin_targets(args.company))
-    os.makedirs(".tmp", exist_ok=True)
-    with open(f".tmp/leads_{args.company}.json", "w") as f:
+    leads = asyncio.run(scrape_linkedin_targets(args.company, args.job_id))
+    from scripts.runtime_paths import leads_path
+    if args.job_id:
+        out_path = leads_path(args.job_id, args.company)
+    else:
+        os.makedirs(".tmp", exist_ok=True)
+        out_path = f".tmp/leads_{args.company}.json"
+    with open(out_path, "w") as f:
         json.dump(leads, f, indent=2)
     logger.info(f"Extracted dynamic and enriched Hunter.io decision-makers list context for {args.company}")

@@ -409,10 +409,13 @@ def main() -> None:
     enriched_context = dict(form_data)
     enriched_context["extracted_intent"] = extracted_intent
 
-    os.makedirs(".tmp", exist_ok=True)
-    with open(".tmp/active_runtime_context.json", "w") as f:
+    # Aislamiento por job_id: el contexto de runtime vive bajo .tmp/job_{job_id}/
+    # para que corridas concurrentes/sucesivas NO se pisen entre sí (root cause de
+    # la contaminación que hacía que una búsqueda heredara el ICP de otra corrida).
+    from scripts.runtime_paths import context_path, news_path, leads_path
+    with open(context_path(args.job_id), "w") as f:
         json.dump(enriched_context, f, indent=2, ensure_ascii=False)
-    logger.info("Runtime context enriched with Phase 0 cognitive intent manifest.")
+    logger.info(f"Runtime context (job-isolated) written for job_id={args.job_id}.")
 
     country: str = form_data.get("pais") or "Colombia"
     discovered_companies: list[str] = discover_companies(industry, size, country, extracted_intent, limit=limite_perfiles)
@@ -475,29 +478,28 @@ def main() -> None:
             logger.info(f"Running news scraper natively for company: '{company}'")
             loop_news = asyncio.new_event_loop()
             asyncio.set_event_loop(loop_news)
-            news_results = loop_news.run_until_complete(fetch_targeted_news(company))
+            news_results = loop_news.run_until_complete(fetch_targeted_news(company, args.job_id))
             loop_news.close()
             
-            os.makedirs(".tmp", exist_ok=True)
-            with open(f".tmp/news_{company}.json", "w") as f:
+            with open(news_path(args.job_id, company), "w") as f:
                 json.dump(news_results, f, indent=2)
 
-            # 2. Lead Scraper (Async)
+            # 2. Lead Scraper (Async) — recibe job_id para leer el contexto aislado
             logger.info(f"Running lead scraper natively for company: '{company}'")
             loop_leads = asyncio.new_event_loop()
             asyncio.set_event_loop(loop_leads)
-            leads_results = loop_leads.run_until_complete(scrape_linkedin_targets(company))
+            leads_results = loop_leads.run_until_complete(scrape_linkedin_targets(company, args.job_id))
             loop_leads.close()
             
-            with open(f".tmp/leads_{company}.json", "w") as f:
+            with open(leads_path(args.job_id, company), "w") as f:
                 json.dump(leads_results, f, indent=2)
 
             # 3. Validator (Sync)
             logger.info(f"Running validator and persister natively for company: '{company}'")
             validate_and_persist(company, args.user_id, args.job_id)
             
-            # Safe automated staging file cleanup routine
-            cleanup_files = [f".tmp/news_{company}.json", f".tmp/leads_{company}.json"]
+            # Safe automated staging file cleanup routine (job-isolated paths)
+            cleanup_files = [news_path(args.job_id, company), leads_path(args.job_id, company)]
             for file_path in cleanup_files:
                 if os.path.exists(file_path):
                     os.remove(file_path)

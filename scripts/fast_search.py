@@ -184,8 +184,105 @@ def apollo_people_search(filters: dict, limit: int) -> list[dict] | None:
     return leads
 
 
+# Variantes de país para el filtro geográfico del Modo Rápido (Tavily no filtra
+# duro por país, así que post-filtramos por estas señales en el texto del resultado).
+_COUNTRY_HINTS = {
+    "colombia": ["colombia", "colombian", "colombiana", "bogota", "bogotá", "medellin",
+                 "medellín", "cali", "barranquilla", "cartagena"],
+    "mexico": ["mexico", "méxico", "mexican", "mexicana", "cdmx", "guadalajara", "monterrey"],
+    "estados unidos": ["united states", "usa", "u.s.", "estados unidos", "american"],
+    "united states": ["united states", "usa", "u.s.", "estados unidos", "american"],
+    "españa": ["spain", "españa", "espana", "spanish", "madrid", "barcelona"],
+    "argentina": ["argentina", "argentinian", "buenos aires"],
+    "chile": ["chile", "chilean", "santiago de chile"],
+    "peru": ["peru", "perú", "peruvian", "lima"],
+}
+
+
+def _location_hints(location: str) -> list[str]:
+    loc = (location or "").strip().lower()
+    if not loc:
+        return []
+    return _COUNTRY_HINTS.get(loc, [loc])
+
+
+def _location_ok(text: str, hints: list[str]) -> bool:
+    if not hints:
+        return True
+    t = (text or "").lower()
+    return any(h in t for h in hints)
+
+
+def _fast_clean_title(role: str, fallback: str = "") -> str:
+    """Normaliza un cargo ruidoso de LinkedIn a un título conciso.
+    Toma el primer segmento con sentido (corta en '|'), quita símbolos/emojis
+    iniciales y trunca para no guardar headlines de marketing completos."""
+    import re
+    r = (role or "").strip()
+    if not r:
+        return fallback
+    # Cortar headlines separados por pipes/•/· → quedarnos con el primer bloque.
+    r = re.split(r"[|•·]", r)[0].strip()
+    # Quitar símbolos/emojis/estrellas al inicio y final.
+    r = re.sub(r"^[^A-Za-zÁÉÍÓÚÑáéíóúñ]+", "", r)
+    r = r.strip(" -–—·.,").strip()
+    if len(r) > 70:
+        r = r[:70].rsplit(" ", 1)[0].strip()
+    return r or fallback
+
+
+# Palabras que delatan el inicio de un CARGO pegado al nombre (sin guion separador).
+_ROLE_KEYWORDS = [
+    "director", "directora", "gerente", "head", "chief", "ceo", "cto", "cfo", "coo",
+    "cio", "vp", "vicepresident", "vicepresidente", "jefe", "jefa", "lider", "líder",
+    "manager", "responsable", "especialista", "coordinador", "coordinadora",
+    "recursos humanos", "gestion humana", "gestión humana", "talento humano",
+    "people", "human resources", "hr ",
+]
+
+
+def _fast_split_name_role(raw: str, fallback_title: str = ""):
+    """Separa nombre y cargo de un título de LinkedIn ruidoso.
+    Maneja el caso sin guion donde el cargo viene pegado (p. ej.
+    'Giovanna García Especialista en Recursos Humanos')."""
+    import re
+    txt = re.sub(r"\s*[|-]\s*LinkedIn.*$", "", raw or "", flags=re.IGNORECASE).strip()
+    # Quitar emojis/símbolos decorativos sueltos.
+    txt = txt.replace("★", " ").replace("•", " - ").strip()
+
+    parts = [p.strip() for p in txt.split("-") if p.strip()]
+    if parts:
+        name_candidate = parts[0]
+        # Formato típico 'Nombre - Cargo - Empresa': el cargo es el SEGUNDO bloque
+        # (no concatenamos el resto para no arrastrar la empresa al cargo).
+        role_candidate = parts[1] if len(parts) > 1 else fallback_title
+    else:
+        name_candidate, role_candidate = txt, fallback_title
+
+    # Si el "nombre" trae un cargo pegado (sin guion), cortarlo en la keyword.
+    low = name_candidate.lower()
+    cut = None
+    for kw in _ROLE_KEYWORDS:
+        idx = low.find(kw)
+        # Solo si la keyword no está al inicio (debe haber un nombre antes).
+        if idx > 2:
+            cut = idx if cut is None else min(cut, idx)
+    if cut is not None:
+        glued_role = name_candidate[cut:].strip()
+        name_candidate = name_candidate[:cut].strip(" -·.,")
+        if not role_candidate or role_candidate == fallback_title:
+            role_candidate = glued_role
+
+    name_parts = name_candidate.split(" ", 1)
+    first = name_parts[0] if name_parts else ""
+    last = name_parts[1] if len(name_parts) > 1 else ""
+    return first, last, _fast_clean_title(role_candidate, fallback_title)
+
+
 def tavily_people_search(filters: dict, limit: int) -> list[dict]:
-    """Fallback: busca perfiles de LinkedIn por cargo + ubicación vía Tavily."""
+    """Fallback: busca perfiles de LinkedIn por cargo + ubicación vía Tavily,
+    con post-filtro geográfico (Tavily no filtra duro por país) y limpieza de
+    nombre/cargo."""
     import re
     tavily_key = os.getenv("TAVILY_API_KEY", "")
     if not tavily_key:
@@ -196,8 +293,10 @@ def tavily_people_search(filters: dict, limit: int) -> list[dict]:
     location = filters["locations"][0] if filters["locations"] else ""
     loc_str = f' "{location}"' if location else ""
     sector = filters["industries"][0] if filters["industries"] else ""
+    geo_hints = _location_hints(location)
 
     leads: list[dict] = []
+    dropped_geo: list[dict] = []
     seen: set[str] = set()
     with httpx.Client(timeout=20.0) as client:
         for title in titles[:4]:
@@ -223,26 +322,40 @@ def tavily_people_search(filters: dict, limit: int) -> list[dict]:
                     continue
                 seen.add(url)
                 raw = item.get("title") or ""
-                raw = re.sub(r"\s*[|-]\s*LinkedIn.*$", "", raw, flags=re.IGNORECASE)
-                parts = [p.strip() for p in raw.split("-") if p.strip()]
-                if not parts:
+                # Heurística empresa: último segmento si el título trae 3+ bloques.
+                parts_for_company = [p.strip() for p in re.sub(r"\s*[|-]\s*LinkedIn.*$", "", raw, flags=re.IGNORECASE).split("-") if p.strip()]
+                company = parts_for_company[-1] if len(parts_for_company) >= 3 else ""
+                first, last, role = _fast_split_name_role(raw, fallback_title=title)
+                if not first:
                     continue
-                full_name = parts[0]
-                name_parts = full_name.split(" ", 1)
-                # Heurística: el último segmento suele ser la empresa.
-                company = parts[-1] if len(parts) >= 3 else ""
-                role = parts[1] if len(parts) >= 2 else title
-                leads.append({
-                    "first_name": name_parts[0] or "",
-                    "last_name": name_parts[1] if len(name_parts) > 1 else "",
+
+                # Post-filtro geográfico: el resultado debe mencionar el país objetivo
+                # en el texto (título/contenido/empresa). Tavily no lo garantiza.
+                geo_text = f"{raw} {item.get('content','')} {company}"
+                lead_row = {
+                    "first_name": first,
+                    "last_name": last,
                     "title": role,
                     "linkedin_url": url,
                     "company_name": company,
                     "email": None,
                     "email_source": None,
                     "email_verified": False,
-                })
+                }
+                if geo_hints and not _location_ok(geo_text, geo_hints):
+                    dropped_geo.append(lead_row)
+                    continue
+                leads.append(lead_row)
                 per_title += 1
+
+    # Si el filtro geográfico dejó la lista vacía (LinkedIn no siempre expone país),
+    # usamos los descartados como respaldo para no devolver cero resultados.
+    if not leads and dropped_geo:
+        logger.info(f"[Fast] Filtro geográfico sin coincidencias explícitas; usando {len(dropped_geo)} resultados de respaldo.")
+        leads = dropped_geo[:limit]
+    elif dropped_geo:
+        logger.info(f"[Fast] Filtro geográfico descartó {len(dropped_geo)} perfiles fuera de '{location}'.")
+
     logger.info(f"[Fast] Tavily devolvió {len(leads)} perfiles.")
     return leads
 
@@ -260,6 +373,9 @@ def _enrich_email(lead: dict) -> None:
         return
     try:
         domain = get_company_domain(company)
+        if not domain:
+            logger.info(f"[Fast] Sin dominio confiable para '{company}'; se omite email de {full_name}.")
+            return
         email = enrich_lead_with_hunter(full_name, domain)
         if email:
             lead["email"] = email
