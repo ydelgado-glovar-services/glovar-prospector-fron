@@ -1,7 +1,7 @@
 "use client"
 
 import { FormEvent, useState } from "react"
-import { Loader2, Play, AlertCircle } from "lucide-react"
+import { Loader2, Play, AlertCircle, Zap, Search } from "lucide-react"
 
 import { useToast } from "@/hooks/use-toast"
 import { Button } from "@/components/ui/button"
@@ -19,12 +19,14 @@ interface SearchFormProps {
   values: ProspectRequest
   isLoading: boolean
   isSessionReady?: boolean
+  mode?: "fast" | "deep"
+  onModeChange?: (mode: "fast" | "deep") => void
   onChange: (patch: Partial<ProspectRequest>) => void
   onSubmit: () => void
   onClear?: () => void
 }
 
-export function SearchForm({ values, isLoading, isSessionReady = true, onChange, onSubmit, onClear }: SearchFormProps) {
+export function SearchForm({ values, isLoading, isSessionReady = true, mode = "deep", onModeChange, onChange, onSubmit, onClear }: SearchFormProps) {
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
   // [Spec-Driven] Local raw string for exclusion list — parsed to string[] on submit
   const [exclusionInput, setExclusionInput] = useState<string>("")
@@ -53,6 +55,25 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+
+    // ── MODO RÁPIDO: validación ligera (basta una frase o un cargo) ──
+    if (mode === "fast") {
+      if (!isSessionReady) {
+        toast({
+          variant: "destructive",
+          title: "Sesión no válida",
+          description: "La sesión aún no se ha cargado. Espera un momento o vuelve a iniciar sesión.",
+        })
+        return
+      }
+      if (!values.prompt?.trim() && !values.cargo_decision?.trim()) {
+        setFormErrors({ prompt: "Describe tu cliente ideal o indica al menos un cargo objetivo." })
+        return
+      }
+      setFormErrors({})
+      onSubmit()
+      return
+    }
 
     // [Spec-Driven] Parse the raw comma-separated string into a clean string[] before submission.
     // Filter out empty tokens from double-commas or trailing commas.
@@ -125,15 +146,77 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
 
   return (
     <Card className="h-full border-border/80 shadow-sm">
-      <CardHeader className="space-y-1 pb-4">
-        <CardTitle className="text-lg font-semibold">Criterios de búsqueda</CardTitle>
-        <CardDescription className="text-sm">
-          Define el perfil ideal de cliente. La IA orquestará la búsqueda y enriquecimiento.
-        </CardDescription>
+      <CardHeader className="space-y-3 pb-4">
+        <div className="space-y-1">
+          <CardTitle className="text-lg font-semibold">Criterios de búsqueda</CardTitle>
+          <CardDescription className="text-sm">
+            Describe tu cliente ideal. La IA orquesta la búsqueda y el enriquecimiento.
+          </CardDescription>
+        </div>
+        {/* Toggle de modo de prospección */}
+        <div className="grid grid-cols-2 gap-1.5 rounded-lg border border-border/70 bg-muted/40 p-1">
+          <button
+            type="button"
+            onClick={() => onModeChange?.("fast")}
+            disabled={isLoading}
+            className={`flex flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left transition-colors ${
+              mode === "fast" ? "bg-card shadow-sm ring-1 ring-primary/30" : "hover:bg-card/60"
+            }`}
+          >
+            <span className="flex items-center gap-1.5 text-sm font-semibold">
+              <Zap className={`h-3.5 w-3.5 ${mode === "fast" ? "text-primary" : "text-muted-foreground"}`} /> Rápido
+            </span>
+            <span className="text-[10px] leading-tight text-muted-foreground">Lista de contactos en segundos</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onModeChange?.("deep")}
+            disabled={isLoading}
+            className={`flex flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left transition-colors ${
+              mode === "deep" ? "bg-card shadow-sm ring-1 ring-primary/30" : "hover:bg-card/60"
+            }`}
+          >
+            <span className="flex items-center gap-1.5 text-sm font-semibold">
+              <Search className={`h-3.5 w-3.5 ${mode === "deep" ? "text-primary" : "text-muted-foreground"}`} /> Profundo
+            </span>
+            <span className="text-[10px] leading-tight text-muted-foreground">Con señales/noticias (~5 min)</span>
+          </button>
+        </div>
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+          {/* Input en lenguaje natural (UX simplificada estilo Enginy) */}
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="prompt" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Describe tu cliente ideal {mode === "fast" ? "" : "(opcional)"}
+            </Label>
+            <Textarea
+              id="prompt"
+              name="prompt"
+              placeholder={mode === "fast"
+                ? "Ej: Directores de Recursos Humanos en empresas de software de 200+ empleados en Colombia"
+                : "Ej: Bancos en Colombia que estén lanzando banca digital y necesiten modernizar su core"}
+              value={values.prompt || ""}
+              onChange={(event) => handleFieldChange({ prompt: event.target.value })}
+              disabled={isLoading}
+              rows={2}
+              className={formErrors.prompt ? "border-red-500 focus-visible:ring-red-500" : ""}
+            />
+            {formErrors.prompt ? (
+              <span className="text-xs text-red-500 flex items-center gap-1">
+                <AlertCircle className="w-3 h-3" /> {formErrors.prompt}
+              </span>
+            ) : (
+              <span className="text-[10px] text-muted-foreground">
+                {mode === "fast"
+                  ? "Modo Rápido: solo necesitas esto (o un cargo). Los campos de abajo son opcionales para afinar."
+                  : "Opcional: si la escribes, autocompleta los campos. El Modo Profundo requiere los campos marcados."}
+              </span>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+            {mode === "deep" && (
             <div className="flex flex-col gap-2">
               <Label htmlFor="mi_empresa" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Mi Empresa (Remitente)
@@ -153,6 +236,7 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
                 </span>
               )}
             </div>
+            )}
 
             <div className="flex flex-col gap-2">
               <Label htmlFor="sector" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -276,6 +360,8 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
             </div>
           </div>
 
+          {mode === "deep" && (
+          <>
           <div className="flex flex-col gap-2">
             <Label htmlFor="dolor_cliente" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Dolor del cliente a resolver
@@ -317,7 +403,10 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
               </span>
             )}
           </div>
+          </>
+          )}
 
+          {mode === "deep" && (
           <Accordion type="single" collapsible className="w-full border rounded-md px-4 py-1 bg-card">
             <AccordionItem value="opciones-comerciales" className="border-none">
               <AccordionTrigger className="text-sm font-semibold hover:no-underline py-3">
@@ -393,6 +482,7 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
               </AccordionContent>
             </AccordionItem>
           </Accordion>
+          )}
 
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
@@ -420,6 +510,7 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
             </div>
           </div>
 
+          {mode === "deep" && (
           <div className="flex flex-col gap-2">
             <Label htmlFor="max_news_articles" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Velocidad de Prospección
@@ -446,6 +537,7 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
               Controla cuántas noticias y publicaciones de LinkedIn extrae el sistema por empresa para optimizar tiempos.
             </span>
           </div>
+          )}
 
           <div className="mt-2 flex flex-col gap-2">
             <Button
@@ -458,7 +550,12 @@ export function SearchForm({ values, isLoading, isSessionReady = true, onChange,
               {isLoading ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  <span>Ejecutando prospección...</span>
+                  <span>{mode === "fast" ? "Buscando contactos..." : "Ejecutando prospección..."}</span>
+                </>
+              ) : mode === "fast" ? (
+                <>
+                  <Zap className="h-4 w-4" aria-hidden="true" />
+                  <span>Buscar contactos (Rápido)</span>
                 </>
               ) : (
                 <>
