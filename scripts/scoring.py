@@ -196,3 +196,39 @@ def disqualified_scores(fit: int, intent: int, reasons: Optional[dict] = None) -
         "score_tier": "D",
         "score_breakdown": breakdown,
     }
+
+
+
+# ── Modo Rápido (sin señales de intención/noticias) ─────────────────────────────
+# En el Modo Rápido NO se mide intent (no se buscan noticias), por lo que el score
+# combina solo FIT firmográfico (la fuente ya filtró industria/geo/tamaño) y el
+# encaje del cargo. Evita que un intent=0 castigue injustamente el ranking.
+W_FIT_FAST = 0.55
+W_ROLE_FAST = 0.45
+
+
+def compute_fast_match(fit: int, role_fit: int, reasons: Optional[dict] = None) -> dict:
+    """Score compuesto para el Modo Rápido: 0.55·fit + 0.45·role_fit (sin intent)."""
+    fit = _clamp(fit)
+    role_fit = _clamp(role_fit)
+    match_score = _clamp(W_FIT_FAST * fit + W_ROLE_FAST * role_fit)
+    tier = tier_from_score(match_score)
+    breakdown = {
+        "fit_score": fit,
+        "intent_score": 0,
+        "role_fit_score": role_fit,
+        "weights": {"fit": W_FIT_FAST, "role_fit": W_ROLE_FAST},
+        "match_score": match_score,
+        "tier": tier,
+        "mode": "fast",
+    }
+    if reasons:
+        breakdown["reasons"] = reasons
+    return {
+        "fit_score": fit,
+        "intent_score": 0,
+        "role_fit_score": role_fit,
+        "match_score": match_score,
+        "score_tier": tier,
+        "score_breakdown": breakdown,
+    }
