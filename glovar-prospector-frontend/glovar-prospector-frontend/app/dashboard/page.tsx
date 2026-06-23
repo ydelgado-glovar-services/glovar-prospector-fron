@@ -21,6 +21,7 @@ import { apiFetch } from "@/lib/api"
 import { useToast } from "@/hooks/use-toast"
 
 const INITIAL_FORM: ProspectRequest = {
+  prompt: "",
   mi_empresa: "",
   sector: "",
   pais: "",
@@ -121,6 +122,7 @@ export default function DashboardPage() {
   const isSessionReady = !authLoading && !!session
 
   const [form, setForm] = useState<ProspectRequest>(INITIAL_FORM)
+  const [prospectMode, setProspectMode] = useState<"fast" | "deep">("fast")
   const [results, setResults] = useState<ProspectResult[]>([])
   const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -312,6 +314,75 @@ export default function DashboardPage() {
     setHasSearched(false)
     setActiveQueryId(null)
     setSearchTimestamp(Date.now())
+  }
+
+  // ── MODO RÁPIDO: prospección síncrona (sin polling) ──────────────────────────
+  const handleFastSubmit = async () => {
+    if (isFetchingRef.current) return
+    isFetchingRef.current = true
+    try {
+      const accessToken = session?.access_token
+      if (!accessToken) {
+        router.push("/login")
+        return
+      }
+      // Validación ligera: basta una frase o un cargo.
+      if (!form.prompt?.trim() && !form.cargo_decision?.trim()) {
+        toast({
+          variant: "destructive",
+          title: "Falta información",
+          description: "Describe tu cliente ideal o indica al menos un cargo objetivo.",
+        })
+        return
+      }
+
+      setIsLoading(true)
+      setIsTimedOut(false)
+      setResults([])
+      setHasSearched(true)
+      setSearchTimestamp(Date.now())
+
+      const res = await apiFetch("/api/v1/prospect/fast", {
+        method: "POST",
+        token: accessToken,
+        body: JSON.stringify({
+          prompt: form.prompt || "",
+          cargo_decision: form.cargo_decision || "",
+          sector: form.sector || "",
+          pais: form.pais || "",
+          mercado_objetivo: form.mercado_objetivo || "",
+          tamano_empresa: form.tamano_empresa || "",
+          keywords_industria: form.keywords_industria || "",
+          limite_perfiles: form.limite_perfiles ?? 15,
+        }),
+      })
+
+      if (res.status === 401) {
+        router.push("/login")
+        return
+      }
+      if (!res.ok) {
+        const t = await res.text()
+        throw new Error(t)
+      }
+      const data = await res.json()
+      const leads: ProspectResult[] = data.leads ?? []
+      setResults(leads)
+      toast({
+        title: "Modo Rápido completado",
+        description: `Se encontraron ${leads.length} contactos (fuente: ${data.source}).`,
+      })
+    } catch (err) {
+      console.error("[Frontend] Error en Modo Rápido:", err)
+      toast({
+        variant: "destructive",
+        title: "Error en Modo Rápido",
+        description: "No se pudo completar la búsqueda rápida. Intenta de nuevo.",
+      })
+    } finally {
+      setIsLoading(false)
+      isFetchingRef.current = false
+    }
   }
 
   // ── UPDATED: fetch explícitamente refresca y verifica la sesión y el token ──
@@ -825,8 +896,10 @@ export default function DashboardPage() {
             values={form}
             isLoading={isLoading}
             isSessionReady={isSessionReady}
+            mode={prospectMode}
+            onModeChange={setProspectMode}
             onChange={handleChange}
-            onSubmit={handleSubmit}
+            onSubmit={prospectMode === "fast" ? handleFastSubmit : handleSubmit}
             onClear={handleClear}
           />
           <ResultsPanel

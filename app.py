@@ -38,7 +38,7 @@ def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
 
 app = FastAPI(
     title="Glovar Lead Prospector Enterprise API",
-    version="3.12.0",
+    version="3.13.0",
     dependencies=[Depends(verify_api_key)]
 )
 
@@ -90,6 +90,19 @@ class ProspectRequest(BaseModel):
 class SendEmailRequest(BaseModel):
     lead_id: int
     target_email: str = Field(..., description="The real destination email address captured dynamically from the UI modal.")
+
+
+class FastProspectRequest(BaseModel):
+    """Modo Rápido: una frase en lenguaje natural + filtros opcionales.
+    Todos los campos son opcionales; el `prompt` se parsea a filtros ICP."""
+    prompt: Optional[str] = ""
+    cargo_decision: Optional[str] = ""
+    sector: Optional[str] = ""
+    pais: Optional[str] = ""
+    mercado_objetivo: Optional[str] = ""
+    tamano_empresa: Optional[str] = ""
+    keywords_industria: Optional[str] = ""
+    limite_perfiles: Optional[int] = 15
 
 # Deprecated in-memory database in favor of direct Supabase persistence
 
@@ -160,6 +173,55 @@ async def trigger_prospecting_flow(payload: ProspectRequest, background_tasks: B
         
     background_tasks.add_task(execute_pipeline_subprocess, temp_file_path, x_user_id, job_id)
     return {"status": "queued", "job_id": job_id}
+
+
+@app.post("/api/v1/prospect/fast", status_code=status.HTTP_200_OK)
+async def trigger_fast_prospecting(payload: FastProspectRequest, x_user_id: str = Header(...)):
+    """Modo Rápido (Express): prospección SÍNCRONA en segundos.
+
+    No usa subprocess ni el pipeline de noticias. Busca contactos por cargo +
+    industria + geografía (Apollo → fallback Tavily), los puntúa por encaje de
+    cargo y los persiste en `leads`. Devuelve los leads de inmediato.
+    """
+    job_id = str(uuid.uuid4())
+    try:
+        await run_in_threadpool(
+            lambda: supabase.table("jobs_status").insert({
+                "job_id": job_id,
+                "user_id": x_user_id,
+                "status": "processing",
+                "progress_percentage": 20,
+                "current_phase": "Modo Rápido: buscando contactos",
+            }).execute()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize fast job: {str(e)}")
+
+    try:
+        # Import perezoso: aísla cualquier problema de importación al endpoint rápido.
+        from scripts.fast_search import run_fast_prospect
+        form = payload.model_dump()
+        result = await run_in_threadpool(run_fast_prospect, form, x_user_id, job_id)
+        await run_in_threadpool(
+            lambda: supabase.table("jobs_status").update({
+                "status": "completed",
+                "progress_percentage": 100,
+                "current_phase": f"Modo Rápido finalizado ({result.get('source')})",
+            }).eq("job_id", job_id).execute()
+        )
+        return {"status": "completed", "job_id": job_id, "source": result.get("source"), "leads": result.get("leads", [])}
+    except Exception as e:
+        try:
+            await run_in_threadpool(
+                lambda: supabase.table("jobs_status").update({
+                    "status": "failed",
+                    "progress_percentage": 100,
+                    "error_message": f"Fast mode failure: {str(e)}",
+                }).eq("job_id", job_id).execute()
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Fast prospecting failure: {str(e)}")
 
 @app.get("/api/v1/prospect/job/{job_id}")
 async def get_job_status(job_id: str, x_user_id: str = Header(..., alias="x-user-id")):

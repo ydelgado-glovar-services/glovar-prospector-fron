@@ -13,6 +13,8 @@
 export type CompanySize = "1-50" | "51-200" | "201-500" | "500+"
 
 export interface ProspectRequest {
+  /** Descripción en lenguaje natural del cliente ideal (UX simplificada). */
+  prompt?: string
   mi_empresa: string
   sector: string
   pais: string
