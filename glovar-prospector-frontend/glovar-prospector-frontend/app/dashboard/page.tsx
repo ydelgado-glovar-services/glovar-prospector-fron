@@ -24,6 +24,7 @@ const INITIAL_FORM: ProspectRequest = {
   mi_empresa: "",
   sector: "",
   pais: "",
+  mercado_objetivo: "",
   tamano_empresa: "",
   cargo_decision: "",
   dolor_cliente: "",

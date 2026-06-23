@@ -112,9 +112,13 @@ def extract_strategic_intent(form_data: dict) -> dict:
         "4. 'rigorous_pain_framework': A deeply academic explanation of the operational failure the client's targets "
         "suffer from. This is used downstream to evaluate leads and write conversion emails. "
         "Be specific about the business impact (financial, regulatory, operational).\n"
-        "5. 'target_market_region': The normalized geographic region where the client operates "
-        "(e.g., 'Colombia', 'LATAM', 'United States').\n"
-        "6. 'anti_profile_constraints': A string containing specific exclusion directives based on your ontological analysis "
+        "5. 'discovery_hq_region': The country/region where the TARGET companies are headquartered (taken from 'País Objetivo'). "
+        "This is WHERE to discover the companies.\n"
+        "6. 'target_market_region': The EXPANSION/SERVICE market where the buying trigger occurs and where the sending company "
+        "delivers its service. If an 'Expansion Target Market' (Mercado Objetivo de Expansión) is provided in the form, USE IT here; "
+        "otherwise set it equal to discovery_hq_region. Example: companies headquartered in 'United States' that are expanding into "
+        "'Colombia' -> discovery_hq_region='United States', target_market_region='Colombia'.\n"
+        "7. 'anti_profile_constraints': A string containing specific exclusion directives based on your ontological analysis "
         "(e.g., 'EXCLUDE any company that provides transportation, logistics, 3PL, 4PL, or freight forwarding services').\n"
         "CRITICAL RULE: The Anti-Profile MUST NEVER include the target industry. If the target industry is Banks and Insurance, "
         "DO NOT exclude banks. The Anti-Profile is STRICTLY for direct competitors of the sending company "
@@ -127,7 +131,8 @@ def extract_strategic_intent(form_data: dict) -> dict:
     Analyze this raw form payload from our B2B prospecting web app:
     - Mi Empresa (Sending Company): {form_data.get('mi_empresa', '')}
     - Sector Objetivo (Target Industry): {form_data.get('sector', '')}
-    - País Objetivo (Target Country): {form_data.get('pais', '')}
+    - País Objetivo (Target Country / HQ): {form_data.get('pais', '')}
+    - Mercado Objetivo de Expansión (Expansion Target Market): {form_data.get('mercado_objetivo', '')}
     - Tamaño de Empresa (Company Size): {form_data.get('tamano_empresa', '')}
     - Dolor del Cliente (Client Pain): {form_data.get('dolor_cliente', '')}
     - Propuesta de Valor (Value Proposition): {form_data.get('propuesta_valor', '')}
@@ -166,7 +171,8 @@ def extract_strategic_intent(form_data: dict) -> dict:
             "target_industry_core": form_data.get("sector", ""),
             "b2b_buying_trigger_context": form_data.get("triggers_compra", "") or "Expansion or operational shift",
             "rigorous_pain_framework": form_data.get("dolor_cliente", ""),
-            "target_market_region": form_data.get("pais", "Colombia"),
+            "discovery_hq_region": form_data.get("pais", "") or "Colombia",
+            "target_market_region": (form_data.get("mercado_objetivo") or form_data.get("pais") or "Colombia"),
             "anti_profile_constraints": " ".join(form_data.get("exclusion_list", []))
         }
 
@@ -191,19 +197,36 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
     cognitive_tokens = " ".join([t for t in extracted_intent.get("optimized_search_tokens", []) if t])
     core_industry = extracted_intent.get("target_industry_core", industry)
 
+    # ── Geografía dual: sede (dónde descubrir) vs mercado de expansión (trigger) ──
+    # Si el cliente busca empresas con sede en `formatted_country` que se expanden
+    # a otro mercado, las consultas combinan ambas geos (caso Elite: sede EE.UU.
+    # + expansión a Colombia). Si no hay mercado de expansión distinto, es el flujo normal.
+    expansion_market = (extracted_intent.get("target_market_region") or "").strip()
+    is_expansion_play = bool(expansion_market) and expansion_market.lower() not in (
+        formatted_country.lower(), (country or "").strip().lower(), "", "global",
+    )
+
     # ── AUDITORÍA #4: Descubrimiento multi-ángulo ──────────────────────────────
-    # Antes el universo salía de UNA sola búsqueda (12 snippets) → recall bajo y
-    # sesgado a "listas top 10". Ahora lanzamos 3 consultas con ángulos distintos
-    # y fusionamos/deduplicamos por URL para un pool más amplio y diverso.
-    discovery_queries = [
-        # Ángulo 1: directorios / listados de empresas del nicho
-        f"list of active {core_industry} companies operating in {formatted_country} with {size} employees {cognitive_tokens}",
-        # Ángulo 2: líderes / mayores actores del sector (captura cuentas top)
-        f"largest and leading {core_industry} companies in {formatted_country} {cognitive_tokens}",
-        # Ángulo 3: orientado a la intención/dolor específico del ICP
-        f"{core_industry} companies {formatted_country} {cognitive_tokens} {extracted_intent.get('b2b_buying_trigger_context', '')}",
-    ]
-    logger.info(f"Multi-angle company discovery ({len(discovery_queries)} queries) for '{core_industry}' in {formatted_country}.")
+    if is_expansion_play:
+        logger.info(f"Expansion-play discovery: HQ='{formatted_country}' expandiendo a '{expansion_market}'.")
+        discovery_queries = [
+            # Ángulo 1: empresas (sede en HQ) que se EXPANDEN al mercado objetivo
+            f"{core_industry} companies headquartered in {formatted_country} expanding into {expansion_market} {cognitive_tokens}",
+            # Ángulo 2: empresas con OPERACIONES/sede en el mercado objetivo
+            f"{core_industry} companies with operations or offices in {expansion_market} {cognitive_tokens}",
+            # Ángulo 3: trigger de entrada/expansión al mercado objetivo
+            f"{core_industry} companies opening operations in {expansion_market} {extracted_intent.get('b2b_buying_trigger_context', '')}",
+        ]
+    else:
+        discovery_queries = [
+            # Ángulo 1: directorios / listados de empresas del nicho
+            f"list of active {core_industry} companies operating in {formatted_country} with {size} employees {cognitive_tokens}",
+            # Ángulo 2: líderes / mayores actores del sector (captura cuentas top)
+            f"largest and leading {core_industry} companies in {formatted_country} {cognitive_tokens}",
+            # Ángulo 3: orientado a la intención/dolor específico del ICP
+            f"{core_industry} companies {formatted_country} {cognitive_tokens} {extracted_intent.get('b2b_buying_trigger_context', '')}",
+        ]
+    logger.info(f"Multi-angle company discovery ({len(discovery_queries)} queries) for '{core_industry}'.")
 
     tavily_key: str = os.getenv("TAVILY_API_KEY", "")
     if not tavily_key:

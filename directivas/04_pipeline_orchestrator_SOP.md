@@ -50,3 +50,12 @@
 ## Addendum v3.12.2 — Anti-perfil no debe incluir la industria objetivo (fix Fase 0)
 - Bug: el Intent Parser (Fase 0) a veces metía la **industria objetivo** dentro de `anti_profile_constraints` (p. ej. "Exclude banks or insurance"), provocando que `validator.py` descartara a todos los clientes válidos (bancos).
 - Fix: el `system_prompt` de `extract_strategic_intent` incluye una **CRITICAL RULE** explícita: el anti-perfil es STRICTAMENTE para competidores directos de la empresa remitente (otras consultoras IT, agencias RPA, etc.), **NUNCA** la industria objetivo. Se añade una verificación final que exige no excluir el sector objetivo y devolver string vacío si no hay un competidor claro.
+
+
+
+## Addendum v3.13 — Geografía dual: sede vs mercado de expansión (expansion play)
+- **Caso de uso:** encontrar empresas con SEDE en un país (ej. EE.UU.) que **se expanden u operan** en otro mercado (ej. Colombia); la entrada a ese mercado es el disparador de compra (típico para un 3PL local).
+- **Nuevo campo (opcional):** `mercado_objetivo` en el formulario / `ProspectRequest`. Si se deja vacío, comportamiento idéntico al actual.
+- **Fase 0 (`main.py`):** ahora emite dos claves geográficas: `discovery_hq_region` (sede, dónde descubrir) y `target_market_region` (mercado de expansión/servicio = `mercado_objetivo` si se provee).
+- **Descubrimiento (`discover_companies`):** si hay "expansion play", las 3 consultas Tavily combinan sede + expansión ("companies headquartered in {HQ} expanding into {mercado}", "with operations/offices in {mercado}", "opening operations in {mercado}").
+- **Validador (Fase 1):** el encaje geográfico premia presencia/señales de expansión en `target_market_region` y **NO penaliza** la sede extranjera; una empresa de la sede sin vínculo con el mercado objetivo = fit geográfico débil.

@@ -171,6 +171,22 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
     target_industry_core = extracted_intent.get("target_industry_core", form_context.get("sector", "su sector"))
     requested_size = form_context.get("tamano_empresa", "")
     target_region = extracted_intent.get("target_market_region", form_context.get("pais", ""))
+    hq_region = extracted_intent.get("discovery_hq_region", form_context.get("pais", ""))
+    is_expansion_play = bool((target_region or "").strip()) and (target_region or "").strip().lower() != (hq_region or "").strip().lower()
+
+    # Directiva geográfica: en un "expansion play" (sede en un país, expansión a otro)
+    # el fit geográfico NO depende de la sede sino de tener/abrir presencia en el
+    # mercado de expansión; la sede extranjera es esperada y NO debe penalizarse.
+    if is_expansion_play:
+        geo_directive = (
+            f"GEOGRAPHIC FIT (expansion play): the company is expected to be headquartered in '{hq_region}'. "
+            f"What matters is whether it HAS, or shows concrete signals of OPENING/EXPANDING, operations in the "
+            f"target market '{target_region}'. Reward real presence/expansion signals in '{target_region}'; "
+            f"do NOT penalize the foreign HQ. A company in '{hq_region}' with NO link to '{target_region}' is a WEAK "
+            f"geographic fit for this client."
+        )
+    else:
+        geo_directive = f"GEOGRAPHIC FIT: the company should operate in '{target_region}'."
 
     trigger_state = (
         "There IS candidate recent news in the context below; evaluate its real strength."
@@ -185,7 +201,8 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
         "Score two independent dimensions from 0 to 100:\n"
         "1) fit_score: how well the TARGET COMPANY matches the client's Ideal Customer Profile — "
         f"industry/sub-niche ('{target_industry_core}'), requested employee size band ('{requested_size}'), "
-        f"geography ('{target_region}'), and relevance to the client's operational pain. "
+        "geography (per the directive below), and relevance to the client's operational pain. "
+        f"{geo_directive} "
         "SIZE RULE: size bands written as 'N+' (e.g. '500+') are a MINIMUM (N or more): a company with 5,000 or "
         "50,000 employees FULLY satisfies '500+'. NEVER penalize a company for being LARGER than the floor. "
         "Set size_match=false (and lower fit_score) ONLY if the company is clearly BELOW the requested floor.\n"

@@ -16,6 +16,10 @@ export interface ProspectRequest {
   mi_empresa: string
   sector: string
   pais: string
+  /** Mercado objetivo de expansión (opcional). Si la empresa tiene sede en `pais`
+   *  pero buscas las que se expanden/operan en otro mercado, indícalo aquí
+   *  (ej. pais="Estados Unidos", mercado_objetivo="Colombia"). */
+  mercado_objetivo?: string
   /** Vacío en el estado inicial; se valida como obligatorio antes de enviar. */
   tamano_empresa: CompanySize | ""
   cargo_decision: string
