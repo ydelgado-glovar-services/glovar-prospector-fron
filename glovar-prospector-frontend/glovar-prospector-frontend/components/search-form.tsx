@@ -224,7 +224,7 @@ export function SearchForm({ values, isLoading, isSessionReady = true, mode = "d
               <Input
                 id="mi_empresa"
                 name="mi_empresa"
-                placeholder="Ej: Glovar Services"
+                placeholder="Ej: Elite Logística"
                 value={values.mi_empresa || ""}
                 onChange={(event) => handleFieldChange({ mi_empresa: event.target.value })}
                 disabled={isLoading}
@@ -469,7 +469,7 @@ export function SearchForm({ values, isLoading, isSessionReady = true, mode = "d
                   <Textarea
                     id="exclusion_list"
                     name="exclusion_list"
-                    placeholder="Ej: Epiliquid, Retail N1, Competidor ABC"
+                    placeholder="Ej: Competidor A, Cliente actual, Empresa XYZ"
                     value={exclusionInput}
                     onChange={(event) => setExclusionInput(event.target.value)}
                     disabled={isLoading}

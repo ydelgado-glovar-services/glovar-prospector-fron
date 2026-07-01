@@ -84,7 +84,7 @@ El sistema no es solo un buscador de leads: es el **centro de operación comerci
 
 | Campo | Qué es | Qué poner (ejemplo) | Por qué importa |
 |---|---|---|---|
-| **Mi Empresa (Remitente)** | Nombre de la empresa del cliente | *Glovar Services* | Personaliza el correo y el contexto |
+| **Mi Empresa (Remitente)** | Nombre de la empresa del cliente | *Elite Logística* | Personaliza el correo y el contexto |
 | **Sector Objetivo** | Industria a la que se le vende (máx. 3 términos) | *Salud, Finanzas* | Enfoca la búsqueda de empresas |
 | **País** | País donde están las empresas objetivo | *Colombia* / *Estados Unidos* | Filtro geográfico principal |
 | **Mercado objetivo / expansión** *(opcional)* | Mercado al que se expanden | País: EE.UU. → Mercado: *Colombia* | Encuentra empresas que operan/expanden a otra región |
