@@ -497,8 +497,33 @@ def execute_deterministic_pattern_fallback(full_name: str, domain: str) -> str:
         
     return f"{first_clean}@{domain}"
 
+def verify_email_with_hunter(email: str, hunter_key: str) -> bool:
+    """Confirma la entregabilidad real de un email vía Hunter Email Verifier
+    (GET /v2/email-verifier). Devuelve True solo si el veredicto es entregable
+    (data.status == 'valid' o data.result == 'deliverable')."""
+    if not email or not hunter_key:
+        return False
+    url = "https://api.hunter.io/v2/email-verifier"
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.get(url, params={"email": email, "api_key": hunter_key})
+            if response.status_code == 200:
+                data = response.json().get("data", {})
+                status = (data.get("status") or "").lower()
+                result = (data.get("result") or "").lower()
+                return status == "valid" or result == "deliverable"
+            logger.warning(f"Hunter Email Verifier status {response.status_code} para '{email}'.")
+    except Exception as e:
+        logger.error(f"Error querying Hunter.io Email Verifier API: {e}")
+    return False
+
+
 def enrich_lead_with_hunter(full_name: str, company_domain: str) -> str | None:
-    """Enriches the lead's email by calling Hunter.io Email Finder API, with deterministic fallback guards."""
+    """Busca y VERIFICA el email profesional de la persona vía Hunter.io.
+
+    Usa el Email Finder (/v2/email-finder) y devuelve el email SOLO si Hunter
+    confirma que es válido/entregable (política "solo correos verídicos"). Si no
+    hay un email verificado, devuelve None (no se infieren correos por patrón)."""
     hunter_key = os.getenv("HUNTER_API_KEY", "")
     if not hunter_key:
         logger.warning("HUNTER_API_KEY is not defined in the environment. Skipping enrichment.")
@@ -536,76 +561,44 @@ def enrich_lead_with_hunter(full_name: str, company_domain: str) -> str | None:
             
             # Hunter.io Quota Exceeded Rate Limit Guard (HTTP 429)
             if response.status_code == 429:
-                logger.warning("[RATE LIMIT GUARD] Hunter.io quota exceeded (429). Deflecting to Apollo.io...")
+                logger.warning("[RATE LIMIT GUARD] Hunter.io quota exceeded (429). Skipping enrichment.")
                 return None
                 
             if response.status_code == 200:
                 data = response.json().get("data", {})
                 email = data.get("email")
-                if email:
-                    # Validar que el email no use un dominio de lista negra
-                    if any(bad in email.lower() for bad in blacklist_domains):
-                        logger.warning(f"Discarding enriched email from public or social platform: {email}")
-                        return None
-                    logger.info(f"✅ Hunter.io enriched: {email} (confidence {data.get('score', 0)}%)")
-                    return email
-                else:
+                if not email:
                     logger.info(f"❌ Hunter.io could not find email for {full_name}")
+                    return None
+                # Descarta dominios públicos / redes sociales.
+                if any(bad in email.lower() for bad in blacklist_domains):
+                    logger.warning(f"Discarding enriched email from public or social platform: {email}")
+                    return None
+                # ── Gate "solo correo verídico" ──
+                # Hunter reporta la validez en data.verification.status. Aceptamos el
+                # email SOLO si está verificado como 'valid'. Si el Finder no trae un
+                # veredicto pero la confianza es alta y el dominio no es catch-all, lo
+                # confirmamos con el Email Verifier antes de aceptarlo.
+                score = data.get("score", 0) or 0
+                finder_status = ((data.get("verification") or {}).get("status") or "").lower()
+                accept_all = bool(data.get("accept_all"))
+                is_valid = finder_status == "valid"
+                if not is_valid and not accept_all and score >= 80:
+                    is_valid = verify_email_with_hunter(email, hunter_key)
+                if is_valid:
+                    logger.info(f"✅ Hunter verificado: {email} (score {score}%, status '{finder_status or 'checked'}')")
+                    return email
+                logger.info(
+                    f"⚠️ Hunter halló {email} pero no es verídico "
+                    f"(score {score}, status '{finder_status or 'n/a'}', accept_all={accept_all}); se descarta."
+                )
+                return None
             else:
                 logger.error(f"Hunter.io API rejected with status {response.status_code}: {response.text}")
                 return None
     except Exception as e:
         logger.error(f"Error querying Hunter.io Email Finder API: {e}")
         return None
-    return None
-
-def enrich_lead_with_apollo(full_name: str, company_domain: str) -> str | None:
-    """Fallback B2B enrichment utilizing Apollo.io contacts/search API."""
-    apollo_key = os.getenv("APOLLO_API_KEY", "")
-    if not apollo_key:
-        logger.debug("APOLLO_API_KEY is not defined in the environment. Skipping Apollo enrichment.")
-        return None
-
-    # DNS Guard: verify domain resolves to an IP address before querying Apollo.io API
-    import socket
-    try:
-        socket.gethostbyname(company_domain)
-    except socket.gaierror:
-        logger.warning(f"[Security] DNS Tampering Guard: Domain '{company_domain}' failed DNS resolution. Aborting Apollo enrichment.")
-        return None
-        
-    url = "https://api.apollo.io/api/v1/contacts/search"
-    headers = {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "X-Api-Key": apollo_key
-    }
-    payload = {
-        "q_keywords": full_name,
-        "q_organization_domains_list": [company_domain]
-    }
-    
-    logger.info(f"Querying Apollo.io Search API fallback for '{full_name}' at domain '{company_domain}'...")
-    try:
-        with httpx.Client(timeout=15.0) as client:
-            response = client.post(url, json=payload, headers=headers)
-            if response.status_code == 200:
-                contacts = response.json().get("contacts", [])
-                if contacts:
-                    for contact in contacts:
-                        email = contact.get("email")
-                        if email and "@" in email:
-                            # Validar que no use un dominio de lista negra
-                            blacklist_domains = ["instagram.com", "facebook.com", "linkedin.com", "twitter.com", "youtube.com", "wikipedia.org", "pinterest.com", "tiktok.com", "github.com", "medium.com", "gmail.com", "hotmail.com", "yahoo.com", "outlook.com"]
-                            if any(bad in email.lower() for bad in blacklist_domains):
-                                continue
-                            logger.info(f"✅ Apollo.io fallback enriched: {email}")
-                            return email
-                    logger.info(f"❌ Apollo.io could not find any valid verified emails for {full_name}")
-            else:
-                logger.error(f"Apollo.io API rejected with status {response.status_code}: {response.text}")
-    except Exception as e:
-        logger.error(f"Error querying Apollo.io Search API: {e}")
     return None
 
 async def fallback_tavily_search(company_name: str, target_roles: list[str], original_company_name: str = None, country: str = "") -> list[dict]:
@@ -901,25 +894,15 @@ async def scrape_linkedin_targets(company_name: str, job_id: str | None = None) 
                 logger.info(f"Sin dominio confiable para '{search_company}'; se omite email de {full_name}.")
                 continue
 
-            # 1. Apollo.io (verificado)
-            email = enrich_lead_with_apollo(full_name, domain)
+            # Única fuente de email: Hunter.io (Finder + Verifier). Política
+            # "solo correos verídicos": si Hunter no confirma un email válido,
+            # se deja vacío (no se infieren correos por patrón).
+            email = enrich_lead_with_hunter(full_name, domain)
             if email:
-                email_source = "apollo"
+                email_source = "hunter"
                 email_verified = True
-
-            # 2. Hunter.io (verificado, con Quota Guard)
-            if not email:
-                email = enrich_lead_with_hunter(full_name, domain)
-                if email:
-                    email_source = "hunter"
-                    email_verified = True
-
-            # 3. Heurística determinista (INFERIDO por patrón — NO verificado)
-            if not email:
-                email = execute_deterministic_pattern_fallback(full_name, domain)
-                email_source = "pattern_inferred"
-                email_verified = False
-                logger.info(f"Using B2B deterministic pattern fallback for {full_name}: {email} (email_verified=False)")
+            else:
+                logger.info(f"Sin email verídico de Hunter para {full_name}; se deja vacío.")
 
             lead["email"] = email
             lead["email_source"] = email_source
