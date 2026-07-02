@@ -11,7 +11,7 @@
 ---
 
 ## 2. Contrato de Configuración y Parámetros de Modal
-- **Nombre de la Aplicación (ASGI):** `glovar-prospector-backend`
+- **Nombre de la Aplicación (ASGI):** `ai-lead-prospector-backend`
 - **Manejador ASGI:** `api` apuntando a `from app import app as fastapi_app`
 - **Límites de Concurrencia de Contenedores:**
   - El decorador `@app.function(...)` debe usar **`max_containers=10`** para permitir ejecuciones de prospección paralelas en lotes simultáneos de hasta 10 instancias.

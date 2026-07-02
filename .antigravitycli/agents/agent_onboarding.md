@@ -1,7 +1,7 @@
-# AGENT ONBOARDING BLUEPRINT: GLOVAR PROSPECTING CORE
+# AGENT ONBOARDING BLUEPRINT: AI LEAD PROSPECTOR CORE
 
 > **ID:** BLUEPRINT-AI-001
-> **Workspace:** Glovar Agency - B2B Whitelabel SaaS (Elite Logística context)
+> **Workspace:** B2B Whitelabel SaaS (Elite Logística context)
 > **Estado:** ACTIVO
 
 Este documento sirve para alinear instantáneamente a cualquier agente de Inteligencia Artificial que tome el control de este espacio de trabajo en el futuro. Léelo atentamente antes de modificar código o realizar planes.

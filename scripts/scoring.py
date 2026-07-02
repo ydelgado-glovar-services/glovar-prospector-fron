@@ -1,6 +1,6 @@
 # scripts/scoring.py
 """
-Motor de scoring ICP (Fit + Intent) — Glovar Prospector.
+Motor de scoring ICP (Fit + Intent) — AI Lead Prospector.
 
 Fundamento (validado contra el mercado B2B 2026):
   - FIT = qué tan bien encaja la cuenta con el Ideal Customer Profile

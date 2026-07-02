@@ -1,6 +1,6 @@
 # scripts/fast_search.py
 """
-Modo Rápido ("Express") — Glovar Prospector.
+Modo Rápido ("Express") — AI Lead Prospector.
 
 Prospección casi instantánea: NO busca noticias ni hace auditoría multi-fase.
 Encuentra contactos por cargo + industria + geografía usando un proveedor de datos,

@@ -30,13 +30,13 @@
 - **Enriquecimiento de Correo (Hunter.io API):**
   - Endpoint: `GET https://api.hunter.io/v2/email-finder`
   - Cabeceras/Parametros: `domain`, `first_name`, `last_name`, `api_key` (HUNTER_API_KEY).
-- **Cascada de Enriquecimiento B2B (Apollo.io ──► Hunter.io ──► Heurística):**
-  - El lead_scraper ejecuta una cascada determinista de enriquecimiento de tres capas:
-    1. **Capa Principal (Apollo.io):** Busca al lead por nombre y dominio utilizando el endpoint `POST https://api.apollo.io/api/v1/contacts/search` con la cabecera de autenticación `X-Api-Key`, cabecera `Content-Type: application/json` y los parámetros `q_keywords` y `q_organization_domains_list`.
-    2. **Capa Secundaria (Hunter.io):** Si Apollo no encuentra al contacto en su base de datos o falla, desvía la consulta a Hunter.io Email Finder usando `GET https://api.hunter.io/v2/email-finder`. Si Hunter devuelve un error de tasa de límite (429), la función retorna `None` de forma limpia.
-    3. **Capa Heurística Final (Deterministic Fallback - LATAM Heuristic):** Si ambas APIs retornan `None`, se genera de forma matemática el patrón corporativo más probable (ej. `{first}.{last}@{domain}`). Esta capa incorpora un filtro de nombres en español (ej. *Carlos*, *Maria*, *Jose*) para identificar si la segunda parte del nombre es un segundo nombre o un apellido, evitando desvíos y rebotes en LATAM.
+- **Enriquecimiento de Email — Hunter.io (política "solo correos verídicos"):**
+  - El lead_scraper usa **Hunter.io como única fuente** de email. Ya NO usa Apollo ni patrones inferidos.
+    1. **Email Finder (`GET https://api.hunter.io/v2/email-finder`):** busca el email por `first_name`, `last_name` y `domain` (`api_key`). Si Hunter devuelve un error de tasa de límite (429), la función retorna `None` de forma limpia.
+    2. **Gate de verificación:** el email se acepta SOLO si es verídico — cuando `data.verification.status == "valid"`, o cuando la confianza es alta (`score >= 80`) y el dominio no es catch-all (`accept_all == false`), confirmándolo con el **Email Verifier** (`GET https://api.hunter.io/v2/email-verifier`; se acepta `data.status == "valid"` o `data.result == "deliverable"`).
+    3. **Sin correo verídico → sin email:** si Hunter no confirma un email válido, el lead queda con `email = None`. No se generan correos por patrón (`{first}.{last}@{domain}`).
 - **Pre-validación Inteligente y Adaptativa por LLM (LLM Pre-flight Validation Gate):**
-  - Antes de realizar cualquier consulta a APIs externas de enriquecimiento B2B (Apollo/Hunter), el scraper realiza una pre-evaluación adaptativa, agnóstica del sector y libre de heurísticas estáticas de palabras clave.
+  - Antes de realizar cualquier consulta al enriquecimiento de email (Hunter), el scraper realiza una pre-evaluación adaptativa, agnóstica del sector y libre de heurísticas estáticas de palabras clave.
   - **Mecanismo Anti-Desincronización (State Desync Guard):** Envía de forma concurrente todos los candidatos extraídos utilizando su `linkedin_url` como identificador único estable en el JSON de entrada y salida, asegurando que el LLM nunca altere el mapeo físico de los leads.
   - **Limpieza Dinámica de Nombre y Título (Fix B):** En lugar de recortar linealmente el título HTML por guiones en Python, se envía el título completo al LLM `meta-llama/llama-4-scout-17b-16e-instruct` para que extraiga de forma semántica el primer nombre, el apellido y el cargo limpio, resolviendo dinámicamente las variaciones de SEO y geografía de Google.
   - **Criterios de Evaluación del LLM (Reglas Actualizadas):**
@@ -51,7 +51,7 @@
 
 ## Addendum v3.12 — Recall y verificación de email (Auditoría #6)
 - Mayor recall de decisores: `resultsPerPage` subido a 5, tope por rol a 3, y slice a los top-8 candidatos.
-- Cada lead persiste el **origen del email**: `email_source` ∈ {`apollo`, `hunter`, `pattern_inferred`} y `email_verified` (true solo con Apollo/Hunter). El patrón determinista `nombre.apellido@dominio` queda marcado como **no verificado** para evitar rebotes.
+- Cada lead persiste el **origen del email**: `email_source` = `hunter` con `email_verified = true`. Política "solo correos verídicos": el email solo se persiste si Hunter lo confirma válido/entregable; de lo contrario el lead queda **sin email** (ya no se usa el patrón `nombre.apellido@dominio`).
 - Modelo Groq configurable por entorno (`GROQ_MODEL_REASONING`). Ver `directivas/09_lead_scoring_engine_SOP.md`.
 
 

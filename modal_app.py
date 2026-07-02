@@ -17,7 +17,7 @@ image = (
 )
 
 # 2. Definir la aplicación en Modal
-app = modal.App("glovar-prospector-backend")
+app = modal.App("ai-lead-prospector-backend")
 
 # 3. Registrar secretos de entorno dinámicos heredados del entorno local de producción
 secret_keys = [

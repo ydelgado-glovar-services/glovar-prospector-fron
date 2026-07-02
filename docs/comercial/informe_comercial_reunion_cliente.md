@@ -1,8 +1,8 @@
-# Informe Comercial y Calculadora de Costos — Glovar Prospector
+# Informe Comercial y Calculadora de Costos — AI Lead Prospector
 ### Documento de trabajo para reunión con cliente
 
 > **Uso:** guía interna + material de demo. Referencia de moneda: **TRM $4.000 COP/USD** (ajustar al día). Modelo de costos: **bootstrap** (solo se paga Hunter.io; el resto opera en capas gratuitas).
-> **Producto:** Glovar Prospector — plataforma SaaS de prospección B2B autónoma + espacio de trabajo comercial (CRM).
+> **Producto:** AI Lead Prospector — plataforma SaaS de prospección B2B autónoma + espacio de trabajo comercial (CRM).
 
 ---
 
@@ -18,7 +18,7 @@
 ## 1. Valor del sistema
 
 ### 1.1 Qué hace
-Glovar Prospector automatiza el trabajo de **encontrar clientes potenciales, investigarlos y preparar el primer contacto**. Opera en dos modos:
+AI Lead Prospector automatiza el trabajo de **encontrar clientes potenciales, investigarlos y preparar el primer contacto**. Opera en dos modos:
 
 - **Modo Rápido (persona):** entrega una lista de contactos calificados por cargo + industria + geografía en **segundos**. Ideal para llenar el pipeline rápido.
 - **Modo Profundo (empresa):** además de encontrar al decisor, **detecta señales de compra recientes (noticias, movimientos, expansiones)**, evalúa el encaje real de cada empresa y **redacta un correo de contacto personalizado** listo para enviar. Tarda de 3 a 10 minutos por lote.

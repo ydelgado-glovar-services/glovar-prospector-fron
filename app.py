@@ -33,11 +33,11 @@ def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
     if not api_key or api_key != expected_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing Glovar Backend API Key"
+            detail="Invalid or missing Backend API Key"
         )
 
 app = FastAPI(
-    title="Glovar Lead Prospector Enterprise API",
+    title="AI Lead Prospector Enterprise API",
     version="3.13.0",
     dependencies=[Depends(verify_api_key)]
 )

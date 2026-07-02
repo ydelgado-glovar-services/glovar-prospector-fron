@@ -1,5 +1,5 @@
 /**
- * lib/types.ts — Contratos de tipos compartidos del frontend Glovar Prospector.
+ * lib/types.ts — Contratos de tipos compartidos del frontend AI Lead Prospector.
  *
  * NOTA DE AUDITORÍA: Este archivo fue restaurado. La carpeta `lib/` estaba siendo
  * excluida del repositorio por la regla `lib/` heredada de la plantilla `.gitignore`

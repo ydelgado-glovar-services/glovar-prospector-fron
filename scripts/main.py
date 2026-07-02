@@ -379,7 +379,7 @@ def update_server_status(job_id: str, phase: str, percentage: int) -> None:
         logger.debug(f"Failed to pipe status telemetry update to dashboard app: {e}")
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Glovar Lead Prospector Engine Main Hub - Discovery First")
+    parser = argparse.ArgumentParser(description="AI Lead Prospector Engine Main Hub - Discovery First")
     parser.add_argument("--payload_path", required=True)
     parser.add_argument("--user_id", required=True)
     parser.add_argument("--job_id", required=True)

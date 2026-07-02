@@ -1,4 +1,4 @@
-# GLOVAR PROSPECTOR WORKSPACE MANIFEST
+# AI LEAD PROSPECTOR WORKSPACE MANIFEST
 
 ## 1. Core Architecture Stack
 - **Frontend Framework:** Next.js 16 (Turbopack Deployment Line).

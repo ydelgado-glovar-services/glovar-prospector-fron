@@ -1,5 +1,5 @@
 -- ============================================================================
--- Glovar Prospector — Migración 001
+-- AI Lead Prospector — Migración 001
 -- Versionado de saved_queries + Mini-CRM (crm_leads, crm_lead_notes)
 --
 -- Proyecto Supabase: Agent_Scraping_Linkedin (acoefbmluadzscwushcw) — PostgreSQL 17

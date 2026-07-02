@@ -1,5 +1,5 @@
 -- ============================================================================
--- Glovar Prospector — Migración 002
+-- AI Lead Prospector — Migración 002
 -- Motor de scoring ICP (fit + intent) y verificación de email en la tabla `leads`
 --
 -- Proyecto Supabase: PostgreSQL 17

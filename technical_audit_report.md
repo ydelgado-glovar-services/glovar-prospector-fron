@@ -1,7 +1,7 @@
-# Glovar Prospector - Technical Audit & Architecture Report
+# AI Lead Prospector - Technical Audit & Architecture Report
 
 ## 1. Project Overview & Current State
-**System Name:** Glovar Prospector (Agent_Scraping_Linkedin_3)
+**System Name:** AI Lead Prospector (Agent_Scraping_Linkedin_3)
 **Version:** 3.10.0 (Production)
 **Status:** Operational and structurally sound. The repository contains a complete pipeline for autonomous B2B intelligence and cold outreach, connecting a Next.js frontend to a FastAPI orchestrator that deploys background jobs on Modal serverless containers.
 

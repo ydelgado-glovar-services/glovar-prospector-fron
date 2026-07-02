@@ -1,6 +1,6 @@
-# GLOVAR PROSPECTOR — ARQUITECTURA TÉCNICA Y MANUAL DE OPERACIÓN
+# AI LEAD PROSPECTOR — ARQUITECTURA TÉCNICA Y MANUAL DE OPERACIÓN
 **Versión de Producción:** `3.14.0`  
-**Autoría:** Glovar Services & Antigravity AI  
+**Autoría:** Antigravity AI  
 
 > **Changelog 3.14.0 — Aislamiento por job + calidad de datos (data-quality hardening)**
 > - **🔒 Aislamiento de corridas por `job_id`:** todos los artefactos temporales viven ahora bajo `.tmp/job_{job_id}/` (nuevo `scripts/runtime_paths.py`). Antes el contexto era un archivo global (`.tmp/active_runtime_context.json`) y el staging por empresa, por lo que **dos corridas concurrentes/sucesivas se pisaban** y una búsqueda podía heredar el ICP de otra (causa raíz de resultados cruzados). Cada job queda 100% aislado.
@@ -33,7 +33,7 @@
 ---
 
 ## 1. Introducción al Sistema
-**Glovar Prospector** es una plataforma empresarial avanzada de **inteligencia comercial y prospección autónoma B2B**. Diseñada especialmente para el sector logístico y de ciencias de la vida, utiliza un motor RAG (Generación Aumentada por Recuperación) cognitivo y multi-agente para descubrir prospectos corporativos, rastrear hitos de crecimiento recientes en tiempo real, identificar tomadores de decisiones clave en LinkedIn, enriquecer datos de contacto corporativos directos y generar secuencias hiper-personalizadas de correo frío orientadas al dolor operacional del cliente.
+**AI Lead Prospector** es una plataforma empresarial avanzada de **inteligencia comercial y prospección autónoma B2B**. Diseñada especialmente para el sector logístico y de ciencias de la vida, utiliza un motor RAG (Generación Aumentada por Recuperación) cognitivo y multi-agente para descubrir prospectos corporativos, rastrear hitos de crecimiento recientes en tiempo real, identificar tomadores de decisiones clave en LinkedIn, enriquecer datos de contacto corporativos directos y generar secuencias hiper-personalizadas de correo frío orientadas al dolor operacional del cliente.
 
 ---
 

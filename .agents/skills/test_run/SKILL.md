@@ -1,9 +1,9 @@
 ---
-name: test_glovar
-description: Launches a real execution run using the dynamic form JSON payload cache on disk for Glovar Services.
+name: test_run
+description: Launches a real execution run using the dynamic form JSON payload cache on disk for the active sender company.
 ---
 
-# test_glovar
+# test_run
 
 ## Execution Call
 ```bash
