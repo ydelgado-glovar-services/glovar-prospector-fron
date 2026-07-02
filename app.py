@@ -180,8 +180,9 @@ async def trigger_fast_prospecting(payload: FastProspectRequest, x_user_id: str 
     """Modo Rápido (Express): prospección SÍNCRONA en segundos.
 
     No usa subprocess ni el pipeline de noticias. Busca contactos por cargo +
-    industria + geografía (Apollo → fallback Tavily), los puntúa por encaje de
-    cargo y los persiste en `leads`. Devuelve los leads de inmediato.
+    industria + geografía (Tavily), los puntúa por encaje de cargo y los
+    persiste en `leads`. Los emails se verifican con Hunter. Devuelve los
+    leads de inmediato.
     """
     job_id = str(uuid.uuid4())
     try:

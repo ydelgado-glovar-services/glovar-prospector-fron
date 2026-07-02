@@ -6,9 +6,9 @@ Prospección casi instantánea: NO busca noticias ni hace auditoría multi-fase.
 Encuentra contactos por cargo + industria + geografía usando un proveedor de datos,
 los puntúa por encaje de cargo (role_fit determinista) y persiste en `leads`.
 
-Arquitectura de proveedor intercambiable (resiliente al plan de Apollo):
-  1) Apollo People Search (mixed_people/search)  → preferido, emails verificados.
-  2) Tavily LinkedIn search                       → fallback siempre disponible.
+Proveedor de datos:
+  - Tavily LinkedIn search → descubre contactos por cargo + industria + geografía.
+Los emails se enriquecen y verifican vía Hunter.io (política "solo correos verídicos").
 
 Se ejecuta DENTRO del proceso FastAPI (sin subprocess ni jobs_status): responde
 en segundos. Reutiliza el enriquecimiento, dedup y scoring del pipeline existente.
@@ -33,7 +33,6 @@ from scripts.scoring import deterministic_role_fit, compute_fast_match
 from scripts.lead_scraper import (
     get_company_domain,
     enrich_lead_with_hunter,
-    execute_deterministic_pattern_fallback,
     deduplicate_leads,
 )
 
@@ -127,61 +126,6 @@ def parse_icp_prompt(prompt: str, overrides: dict) -> dict:
                 out.append(v)
         filters[k] = out
     return filters
-
-
-def apollo_people_search(filters: dict, limit: int) -> list[dict] | None:
-    """Busca personas en la base global de Apollo. Devuelve None si el plan no
-    permite el endpoint de búsqueda (403/422) o no hay API key."""
-    key = os.getenv("APOLLO_API_KEY", "")
-    if not key:
-        return None
-
-    payload: dict = {"page": 1, "per_page": min(max(limit, 1), 25)}
-    if filters["titles"]:
-        payload["person_titles"] = filters["titles"]
-    if filters["locations"]:
-        payload["person_locations"] = filters["locations"]
-    if filters["employee_min"]:
-        payload["organization_num_employees_ranges"] = [f"{filters['employee_min']},1000000"]
-    kw = " ".join([filters.get("keywords", "")] + filters.get("industries", [])).strip()
-    if kw:
-        payload["q_keywords"] = kw
-
-    headers = {"Content-Type": "application/json", "Cache-Control": "no-cache", "X-Api-Key": key}
-    try:
-        with httpx.Client(timeout=20.0) as client:
-            resp = client.post("https://api.apollo.io/v1/mixed_people/search", json=payload, headers=headers)
-            if resp.status_code in (401, 403, 422):
-                logger.warning(f"[Fast] Apollo search no disponible (status {resp.status_code}); usando fallback Tavily.")
-                return None
-            if resp.status_code != 200:
-                logger.warning(f"[Fast] Apollo search status {resp.status_code}; fallback Tavily.")
-                return None
-            people = resp.json().get("people", []) or []
-    except Exception as e:
-        logger.warning(f"[Fast] Apollo search error ({e}); fallback Tavily.")
-        return None
-
-    leads: list[dict] = []
-    for p in people:
-        org = p.get("organization") or {}
-        email = p.get("email")
-        # Apollo enmascara emails no desbloqueados con placeholders.
-        if email and ("not_unlocked" in email or "domain.com" in email):
-            email = None
-        verified = bool(email) and p.get("email_status") in ("verified", "likely to engage")
-        leads.append({
-            "first_name": p.get("first_name", "") or "",
-            "last_name": p.get("last_name", "") or "",
-            "title": p.get("title", "") or "",
-            "linkedin_url": p.get("linkedin_url", "") or "",
-            "company_name": org.get("name", "") or "",
-            "email": email,
-            "email_source": "apollo" if email else None,
-            "email_verified": verified,
-        })
-    logger.info(f"[Fast] Apollo devolvió {len(leads)} contactos.")
-    return leads
 
 
 # Variantes de país para el filtro geográfico del Modo Rápido (Tavily no filtra
@@ -361,8 +305,9 @@ def tavily_people_search(filters: dict, limit: int) -> list[dict]:
 
 
 def _enrich_email(lead: dict) -> None:
-    """Completa el email del lead (si falta) priorizando Hunter (verificado) y
-    cayendo a patrón determinista (no verificado). Solo si hay empresa resoluble."""
+    """Completa el email del lead (si falta) SOLO con un correo verificado por
+    Hunter (política "solo correos verídicos"). Si Hunter no lo confirma, el lead
+    se deja sin email (no se infieren correos por patrón)."""
     if lead.get("email"):
         return
     company = lead.get("company_name", "")
@@ -381,11 +326,8 @@ def _enrich_email(lead: dict) -> None:
             lead["email"] = email
             lead["email_source"] = "hunter"
             lead["email_verified"] = True
-            return
-        email = execute_deterministic_pattern_fallback(full_name, domain)
-        lead["email"] = email
-        lead["email_source"] = "pattern_inferred"
-        lead["email_verified"] = False
+        else:
+            logger.info(f"[Fast] Sin email verídico de Hunter para {full_name}; se deja vacío.")
     except Exception as e:
         logger.debug(f"[Fast] Email enrichment skip para {full_name}: {e}")
 
@@ -404,12 +346,9 @@ def run_fast_prospect(form: dict, user_id: str, job_id: str) -> dict:
     target_roles = filters["titles"] or _csv(form.get("cargo_decision"))
     logger.info(f"[Fast] Filtros ICP: {json.dumps(filters, ensure_ascii=False)}")
 
-    # Proveedor intercambiable: Apollo → Tavily.
-    leads = apollo_people_search(filters, limit)
-    source = "apollo"
-    if leads is None:
-        leads = tavily_people_search(filters, limit)
-        source = "tavily"
+    # Proveedor de datos: Tavily LinkedIn search.
+    leads = tavily_people_search(filters, limit)
+    source = "tavily"
 
     leads = deduplicate_leads(leads)[:limit]
 
