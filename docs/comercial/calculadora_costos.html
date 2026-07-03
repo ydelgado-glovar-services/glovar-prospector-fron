@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Calculadora de Costos — AI Lead Prospector</title>
+<style>
+  :root{
+    --bg:#0f172a; --card:#1e293b; --line:#334155; --txt:#e2e8f0; --muted:#94a3b8;
+    --accent:#38bdf8; --ok:#22c55e; --bad:#ef4444; --warn:#f59e0b;
+  }
+  *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  body{margin:0;background:var(--bg);color:var(--txt);padding:24px;line-height:1.5}
+  .wrap{max-width:980px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .card h2{font-size:15px;margin:0 0 14px;color:var(--accent)}
+  .plan{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+  .plan .info{font-size:13px}
+  .plan .info small{color:var(--muted);display:block;font-size:11px}
+  .plan input{width:64px;padding:8px;text-align:center;background:var(--bg);color:var(--txt);
+    border:1px solid var(--line);border-radius:8px;font-size:15px}
+  .row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+  .row:last-child{border-bottom:none}
+  .row b{font-variant-numeric:tabular-nums}
+  .bar{height:9px;background:var(--bg);border-radius:6px;overflow:hidden;margin:4px 0 12px}
+  .bar > div{height:100%;transition:width .25s}
+  .lim{font-size:12px;color:var(--muted);margin-bottom:2px;display:flex;justify-content:space-between}
+  .verdict{text-align:center;font-size:16px;font-weight:700;padding:12px;border-radius:10px;margin-top:6px}
+  .big{font-size:26px;font-weight:800}
+  .accent{color:var(--accent)} .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+  .note{font-size:11px;color:var(--muted);margin-top:14px}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+  td,th{padding:5px;border-bottom:1px solid var(--line);text-align:left}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Calculadora de Costos — AI Lead Prospector</h1>
+  <div class="sub">Solo se pagan 3 plataformas · Facturación mensual · TRM $4.000 COP/USD. Ajusta cuántos clientes de cada plan y mira si cabe en los cupos, tu costo por lead y tu margen.</div>
+
+  <div class="grid">
+    <!-- ENTRADAS -->
+    <div class="card">
+      <h2>1 · ¿Cuántos clientes de cada plan?</h2>
+
+      <div class="plan">
+        <div class="info"><b>Natural</b> — persona (rápido)<small>$149.000 COP · 150 contactos · sin Apify</small></div>
+        <input type="number" id="nat" min="0" value="4">
+      </div>
+      <div class="plan">
+        <div class="info"><b>Negocio</b> — empresa (profundo)<small>$390.000 COP · 150 leads</small></div>
+        <input type="number" id="neg" min="0" value="0">
+      </div>
+      <div class="plan">
+        <div class="info"><b>Growth</b> — empresa (profundo)<small>$790.000 COP · 450 leads</small></div>
+        <input type="number" id="gro" min="0" value="1">
+      </div>
+      <div class="plan">
+        <div class="info"><b>Business</b> — empresa (profundo)<small>$1.900.000 COP · 1.200 leads</small></div>
+        <input type="number" id="bus" min="0" value="0">
+      </div>
+
+      <div class="note">
+        Constantes (medidas/estimadas): Tavily 4,2 cr/empresa · Apify $0,022/empresa ·
+        Hunter 1,3 cr/contacto · Tavily 0,8 cr/contacto rápido · 3,5 contactos por empresa.
+      </div>
+    </div>
+
+    <!-- RESULTADOS -->
+    <div class="card">
+      <h2>2 · Uso de los cupos mensuales</h2>
+
+      <div class="lim"><span>Hunter (correos verificados)</span><span id="hTxt"></span></div>
+      <div class="bar"><div id="hBar"></div></div>
+
+      <div class="lim"><span>Tavily (investigación)</span><span id="tTxt"></span></div>
+      <div class="bar"><div id="tBar"></div></div>
+
+      <div class="lim"><span>Apify (empresas, solo profundo)</span><span id="aTxt"></span></div>
+      <div class="bar"><div id="aBar"></div></div>
+
+      <div id="verdict" class="verdict"></div>
+    </div>
+  </div>
+
+  <!-- NEGOCIO -->
+  <div class="card" style="margin-top:16px">
+    <h2>3 · Tu negocio este mes</h2>
+    <div class="grid">
+      <div>
+        <div class="row"><span>Clientes totales</span><b id="clientes"></b></div>
+        <div class="row"><span>Contactos totales/mes</span><b id="leads"></b></div>
+        <div class="row"><span>Stack que necesitas</span><b id="stack"></b></div>
+        <div class="row"><span>Costo real por lead (tú)</span><b id="cpl" class="accent"></b></div>
+      </div>
+      <div>
+        <div class="row"><span>Ingreso mensual</span><b id="ingreso"></b></div>
+        <div class="row"><span>Costo mensual (stack)</span><b id="costo"></b></div>
+        <div class="row"><span>Ganancia neta</span><b id="neta" class="ok"></b></div>
+        <div class="row"><span>Margen</span><b id="margen" class="ok"></b></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    Límites del stack: Hunter 2.000 créditos (~1.500 contactos verificados) · Tavily 4.000 créditos · Apify ~$29.
+    Si un cupo se pasa del 100%, debes subir de plan en esa plataforma (ej. Hunter Growth $104 = 5.000 créditos).
+  </div>
+</div>
+
+<script>
+  // ── Constantes del modelo (mensual, TRM 4000) ──
+  const TRM = 4000;
+  const HUNTER_CAP = 2000, TAVILY_CAP = 4000, APIFY_CAP = 29;      // cupos/mes
+  const HUNTER_PER_CONTACT = 1.3;                                   // cr por contacto verificado
+  const TAVILY_PER_EMPRESA = 4.2, APIFY_PER_EMPRESA = 0.022;        // profundo
+  const TAVILY_PER_FAST = 0.8;                                      // rápido
+  const CONTACTS_PER_EMPRESA = 3.5;
+  const STACK_FULL = 108 * TRM;   // con Apify
+  const STACK_LITE = 79 * TRM;    // solo personas (sin Apify)
+
+  // Planes: precio COP, contactos/mes, modo
+  const PLANS = {
+    nat: {price:149000, leads:150, deep:false},
+    neg: {price:390000, leads:150, deep:true},
+    gro: {price:790000, leads:450, deep:true},
+    bus: {price:1900000, leads:1200, deep:true},
+  };
+
+  const fmt = n => "$" + Math.round(n).toLocaleString("es-CO") + " COP";
+  const val = id => Math.max(0, parseInt(document.getElementById(id).value) || 0);
+
+  function setBar(barId, txtId, used, cap, unit){
+    const pct = cap>0 ? (used/cap)*100 : 0;
+    const bar = document.getElementById(barId);
+    bar.style.width = Math.min(100, pct) + "%";
+    bar.style.background = pct>100 ? "var(--bad)" : pct>85 ? "var(--warn)" : "var(--ok)";
+    document.getElementById(txtId).textContent =
+      Math.round(used).toLocaleString("es-CO") + " / " + cap.toLocaleString("es-CO") + " " + unit + " (" + Math.round(pct) + "%)";
+  }
+
+  function calc(){
+    const c = {nat:val("nat"), neg:val("neg"), gro:val("gro"), bus:val("bus")};
+
+    let fastContacts=0, deepContacts=0, revenue=0, clientes=0;
+    for(const k in PLANS){
+      const p = PLANS[k], n = c[k];
+      clientes += n;
+      revenue += n * p.price;
+      if(p.deep) deepContacts += n * p.leads;
+      else fastContacts += n * p.leads;
+    }
+    const empresas = deepContacts / CONTACTS_PER_EMPRESA;
+    const totalContacts = fastContacts + deepContacts;
+
+    // Consumo de cupos
+    const hunter = totalContacts * HUNTER_PER_CONTACT;
+    const tavily = empresas * TAVILY_PER_EMPRESA + fastContacts * TAVILY_PER_FAST;
+    const apify  = empresas * APIFY_PER_EMPRESA;
+
+    setBar("hBar","hTxt", hunter, HUNTER_CAP, "cr");
+    setBar("tBar","tTxt", tavily, TAVILY_CAP, "cr");
+    setBar("aBar","aTxt", apify,  APIFY_CAP,  "USD");
+
+    const fits = hunter<=HUNTER_CAP && tavily<=TAVILY_CAP && apify<=APIFY_CAP;
+    const v = document.getElementById("verdict");
+    if(clientes===0){ v.textContent="Agrega clientes ↑"; v.style.background="var(--bg)"; v.className="verdict"; }
+    else if(fits){ v.innerHTML="✅ CABE en el stack actual"; v.style.background="rgba(34,197,94,.15)"; v.className="verdict ok"; }
+    else { v.innerHTML="❌ SE PASA — sube de plan en la plataforma en rojo"; v.style.background="rgba(239,68,68,.15)"; v.className="verdict bad"; }
+
+    // Stack: si hay empresas usa full ($108), si solo personas usa lite ($79)
+    const stack = deepContacts>0 ? STACK_FULL : (clientes>0 ? STACK_LITE : 0);
+    const costPerLead = totalContacts>0 ? stack/totalContacts : 0;
+    const net = revenue - stack;
+    const margin = revenue>0 ? (net/revenue)*100 : 0;
+
+    document.getElementById("clientes").textContent = clientes;
+    document.getElementById("leads").textContent = totalContacts.toLocaleString("es-CO");
+    document.getElementById("stack").textContent = deepContacts>0 ? "Completo (Apify+Tavily+Hunter) $108" : (clientes>0?"Solo personas (Tavily+Hunter) $79":"—");
+    document.getElementById("cpl").textContent = totalContacts>0 ? fmt(costPerLead) + " / lead" : "—";
+    document.getElementById("ingreso").textContent = fmt(revenue);
+    document.getElementById("costo").textContent = fmt(stack);
+    const netEl = document.getElementById("neta");
+    netEl.textContent = fmt(net); netEl.className = net>=0?"ok":"bad";
+    const marEl = document.getElementById("margen");
+    marEl.textContent = Math.round(margin) + "%"; marEl.className = margin>=0?"ok":"bad";
+  }
+
+  document.querySelectorAll("input").forEach(i=>i.addEventListener("input",calc));
+  calc();
+</script>
+</body>
+</html>
