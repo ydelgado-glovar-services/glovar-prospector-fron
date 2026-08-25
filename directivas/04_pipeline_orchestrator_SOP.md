@@ -24,7 +24,7 @@
 - **Prohibición de Rutas Absolutas:** Bajo ninguna circunstancia se deben codificar rutas absolutas del sistema operativo (`C:\Users\...` o similares) que dependan de la máquina local del desarrollador. Todas las resoluciones deben ser relativas al espacio de trabajo.
 - **Estabilidad de Ejecución:** El orquestador no debe lanzar excepciones de enrutamiento si el entorno virtual local no está configurado. Debe realizar la validación de forma tolerante a fallos y asegurar que el fallback mantenga el pipeline operativo.
 - **Procesamiento Concurrente de Empresas (ThreadPoolExecutor, Idempotencia & Límite de Lote):** El orquestador principal (`main.py`) procesa el lote de empresas objetivo en paralelo utilizando un pool de hilos (`ThreadPoolExecutor`) con **3 workers concurrentes** para máxima velocidad de prospección. La estabilidad en contenedores de producción (Modal) se garantiza mediante el mecanismo de **Idempotencia Activa** que consulta Supabase antes de procesar cada empresa: si ya fue validada para el `job_id` activo, se salta instantáneamente. Esto convierte cualquier reinicio de contenedor de Modal (preemption) de un evento catastrófico a una molestia menor sin pérdida de créditos de API. El contenedor de Modal dispone de **2048 MB de RAM** declarados explícitamente para absorber la carga de 3 subprocesos Python concurrentes con peticiones HTTP simultáneas. Asimismo, se impone un **tope estricto de máximo 20 empresas limpias por job**.
-- **Fase 0: Pre-flight Cognitive Intent Parser:** Antes de cualquier búsqueda o descubrimiento de empresas, el orquestador ejecuta `extract_strategic_intent(form_data)` que utiliza el LLM (`meta-llama/llama-4-scout-17b-16e-instruct`) para traducir el formulario crudo del cliente en un **Manifiesto de Búsqueda Estratégico** (`extracted_intent`) con las siguientes claves cognitivas:
+- **Fase 0: Pre-flight Cognitive Intent Parser:** Antes de cualquier búsqueda o descubrimiento de empresas, el orquestador ejecuta `extract_strategic_intent(form_data)` que utiliza el LLM (`GROQ_MODEL`, default `openai/gpt-oss-120b`) para traducir el formulario crudo del cliente en un **Manifiesto de Búsqueda Estratégico** (`extracted_intent`) con las siguientes claves cognitivas:
   - `optimized_search_tokens`: Los 4 mejores términos de búsqueda optimizados para motores.
   - `target_industry_core`: El nicho de industria normalizado al estándar inglés.
   - `b2b_buying_trigger_context`: Traducción precisa del evento que dispara una venta.
@@ -42,7 +42,7 @@
 ## Addendum v3.12 — Descubrimiento ampliado y slider conectado (Auditoría #4, #7, #8)
 - **Descubrimiento multi-ángulo:** `discover_companies` lanza 3 consultas Tavily (directorio, líderes del sector, intención/dolor) y fusiona/deduplica por URL para un universo más amplio y menos sesgado.
 - **Slider conectado:** el cap de empresas a procesar = `limite_perfiles` (5–25). Antes estaba fijo en 20 y el slider no surtía efecto.
-- **Modelo configurable:** `GROQ_MODEL_REASONING` / `GROQ_MODEL_FAST` por entorno (default Llama-4-Scout).
+- **Modelo configurable (consolidado):** una sola variable `GROQ_MODEL` por entorno (default `openai/gpt-oss-120b`, activo en capa gratuita de Groq).
 - Ver `directivas/09_lead_scoring_engine_SOP.md`.
 
 

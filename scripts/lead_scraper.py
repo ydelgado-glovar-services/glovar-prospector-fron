@@ -26,9 +26,8 @@ except Exception:
 
 load_dotenv()
 
-# ── AUDITORÍA #8: Modelo Groq configurable por entorno ──────────────────────────
-GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
-GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+# ── Modelo Groq único, configurable por entorno (ver directivas/09_lead_scoring_engine_SOP.md) ──
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 
 def get_next_groq_key(company_name: str = "") -> str:
@@ -157,7 +156,7 @@ def deduplicate_leads(leads: list[dict]) -> list[dict]:
 
 async def validate_leads_with_llm(company_name: str, target_roles: list[str], leads: list[dict]) -> list[dict]:
     """
-    Utiliza un LLM (Llama 3.1 8B en Groq) rápido, económico y adaptativo para validar si
+    Utiliza un LLM (GROQ_MODEL en Groq) rápido, económico y adaptativo para validar si
     los perfiles de LinkedIn corresponden a empleados activos y coinciden semánticamente
     con los cargos decisores autorizados. Esto es 100% agnóstico de la industria/sector.
     """
@@ -237,13 +236,13 @@ async def validate_leads_with_llm(company_name: str, target_roles: list[str], le
         api_key = get_next_groq_key(company_name)
         client = Groq(api_key=api_key)
         
-        # We use Llama 4 Scout for high cognitive precision role matching
+        # GROQ_MODEL (default llama-3.3-70b-versatile) for high cognitive precision role matching
         response = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            model=GROQ_MODEL_REASONING,
+            model=GROQ_MODEL,
             temperature=0.0,
             response_format={"type": "json_object"}
         )

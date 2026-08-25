@@ -38,7 +38,7 @@
 - **Pre-validación Inteligente y Adaptativa por LLM (LLM Pre-flight Validation Gate):**
   - Antes de realizar cualquier consulta al enriquecimiento de email (Hunter), el scraper realiza una pre-evaluación adaptativa, agnóstica del sector y libre de heurísticas estáticas de palabras clave.
   - **Mecanismo Anti-Desincronización (State Desync Guard):** Envía de forma concurrente todos los candidatos extraídos utilizando su `linkedin_url` como identificador único estable en el JSON de entrada y salida, asegurando que el LLM nunca altere el mapeo físico de los leads.
-  - **Limpieza Dinámica de Nombre y Título (Fix B):** En lugar de recortar linealmente el título HTML por guiones en Python, se envía el título completo al LLM `meta-llama/llama-4-scout-17b-16e-instruct` para que extraiga de forma semántica el primer nombre, el apellido y el cargo limpio, resolviendo dinámicamente las variaciones de SEO y geografía de Google.
+  - **Limpieza Dinámica de Nombre y Título (Fix B):** En lugar de recortar linealmente el título HTML por guiones en Python, se envía el título completo al LLM (`GROQ_MODEL`, default `openai/gpt-oss-120b`) para que extraiga de forma semántica el primer nombre, el apellido y el cargo limpio, resolviendo dinámicamente las variaciones de SEO y geografía de Google.
   - **Criterios de Evaluación del LLM (Reglas Actualizadas):**
     1. **Relación Laboral Activa — LENIENTE (Fix C):** Se asume que TODOS los candidatos son empleados activos de la empresa target por defecto (`is_active_employee: true`), ya que fueron encontrados mediante búsqueda directa `site:linkedin.com/in/ + nombre de empresa`. Solo se marca `is_active_employee: false` si el título contiene EXPLÍCITAMENTE palabras como `former`, `ex-`, `past`, `previo`, `anterior`.
     2. **Alineación de Cargo (Role Fit — FILTRO PRINCIPAL):** El criterio de descalificación principal es `is_role_match`. Mapea semántica y conceptualmente si el cargo del lead se alinea con los roles decisores autorizados por el usuario (`cargo_decision`), descartando cargos basura o genéricos sin importar el sector.
@@ -52,7 +52,7 @@
 ## Addendum v3.12 — Recall y verificación de email (Auditoría #6)
 - Mayor recall de decisores: `resultsPerPage` subido a 5, tope por rol a 3, y slice a los top-8 candidatos.
 - Cada lead persiste el **origen del email**: `email_source` = `hunter` con `email_verified = true`. Política "solo correos verídicos": el email solo se persiste si Hunter lo confirma válido/entregable; de lo contrario el lead queda **sin email** (ya no se usa el patrón `nombre.apellido@dominio`).
-- Modelo Groq configurable por entorno (`GROQ_MODEL_REASONING`). Ver `directivas/09_lead_scoring_engine_SOP.md`.
+- Modelo Groq único configurable por entorno (`GROQ_MODEL`). Ver `directivas/09_lead_scoring_engine_SOP.md`.
 
 
 

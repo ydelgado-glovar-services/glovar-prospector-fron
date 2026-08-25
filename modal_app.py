@@ -29,12 +29,19 @@ secret_keys = [
     "GLOVAR_BACKEND_API_KEY",
     "INTERNAL_BACKEND_URL",
     "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET"
+    "GOOGLE_CLIENT_SECRET",
+    "GROQ_MODEL",
 ]
 
+# IMPORTANTE: solo se inyecta una variable si tiene valor en el .env/entorno local.
+# Un `modal deploy` corrido sin .env local (o con variables vacías) NO debe pisar
+# con strings vacíos los secretos ya configurados en producción — incidente real
+# ocurrido antes de este fix.
 secrets_dict = {}
 for key in secret_keys:
-    secrets_dict[key] = os.getenv(key, "")
+    value = os.getenv(key)
+    if value:
+        secrets_dict[key] = value
 
 # Inyectar dinámicamente todo el pool rotativo de Groq (GROQ_API_KEY, GROQ_API_KEY_1...9)
 if os.getenv("GROQ_API_KEY"):

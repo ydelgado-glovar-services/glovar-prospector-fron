@@ -18,8 +18,7 @@ import os
 import sys
 import json
 import logging
-import time
-import hashlib
+import random
 
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _parent_dir not in sys.path:
@@ -38,13 +37,19 @@ from scripts.lead_scraper import (
 
 logger = logging.getLogger("prospector_fast")
 
-GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+# ── Modelo Groq único, configurable por entorno (ver directivas/09_lead_scoring_engine_SOP.md) ──
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # Mapa tamaño de empresa → mínimo de empleados (las bandas "N+" son un piso).
 _SIZE_MIN = {"1-50": 1, "51-200": 51, "201-500": 201, "500+": 500}
 
 
 def _get_groq_key() -> str | None:
+    """Selección aleatoria (no por minuto) para repartir la carga entre contenedores
+    Modal concurrentes. Con rotación por `time.time()/60`, todas las peticiones
+    simultáneas en el mismo minuto —en cualquier contenedor— caían en la misma
+    llave; con `random.choice` cada llamada reparte independientemente sobre
+    todo el pool disponible."""
     keys = [os.getenv(f"GROQ_API_KEY_{i}") for i in range(1, 10)]
     keys = [k for k in keys if k]
     if not keys:
@@ -53,8 +58,7 @@ def _get_groq_key() -> str | None:
             keys = [std]
     if not keys:
         return None
-    idx = int(time.time() / 60)
-    return keys[idx % len(keys)]
+    return random.choice(keys)
 
 
 def _csv(value) -> list[str]:
@@ -98,7 +102,7 @@ def parse_icp_prompt(prompt: str, overrides: dict) -> dict:
                     "Be concise; only include what is clearly stated or strongly implied."
                 )
                 resp = client.chat.completions.create(
-                    model=GROQ_MODEL_FAST,
+                    model=GROQ_MODEL,
                     messages=[
                         {"role": "system", "content": system},
                         {"role": "user", "content": prompt},

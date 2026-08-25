@@ -19,7 +19,7 @@ import groq
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-from scripts.scoring import compute_composite, account_qualifies, disqualified_scores, deterministic_role_fit
+from scripts.scoring import compute_composite, account_qualifies, disqualified_scores, deterministic_role_fit, TIMING_PENALTY_NO_TRIGGER
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,11 +36,8 @@ except Exception:
 
 load_dotenv()
 
-# ── AUDITORÍA #8: Modelo configurable por entorno ───────────────────────────────
-# Permite afinar throughput/costo sin tocar código. Por defecto se mantiene el
-# modelo actual (Llama-4-Scout) para no alterar la calidad existente.
-GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
-GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+# ── Modelo Groq único, configurable por entorno (ver directivas/09_lead_scoring_engine_SOP.md) ──
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 
 def get_next_groq_key(company_name: str = "") -> str:
@@ -125,10 +122,13 @@ def _call_groq_with_retry(system_prompt: str, user_prompt: str, max_retries: int
     
     for attempt in range(max_retries):
         try:
-            api_key = get_next_groq_key(company_name)
+            # Semilla por intento: un reintento tras 429 debe rotar a OTRA llave del
+            # pool, no volver a pedir la misma que acaba de rate-limitear.
+            key_seed = company_name if attempt == 0 else f"{company_name}::retry{attempt}"
+            api_key = get_next_groq_key(key_seed)
             groq_client = Groq(api_key=api_key)
             chat_completion = groq_client.chat.completions.create(
-                model=GROQ_MODEL_REASONING,
+                model=GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -274,9 +274,12 @@ def _run_company_audit(company_name: str, news_data: list, factual_context: str,
         just = raw_json.get("company_justification")
         if isinstance(just, list):
             raw_json["company_justification"] = "\n".join(str(item) for item in just)
-        # Si no hay trigger reciente, forzar intent_score = 0 (consistencia determinista).
+        # Si no hay trigger reciente, forzar intent_score = 0 (consistencia determinista)
+        # Y penalizar el fit_score mismo (decisión de negocio 2026-08-25: el timing es
+        # ahora un factor crítico de calificación, no solo del intent — ver scoring.py).
         if not has_recent_trigger:
             raw_json["intent_score"] = 0
+            raw_json["fit_score"] = round(raw_json.get("fit_score", 0) * TIMING_PENALTY_NO_TRIGGER)
         audit = CompanyAuditResult.model_validate(raw_json)
         # Recalcular la aprobación con la regla fit-first determinista (no confiar
         # ciegamente en el booleano del LLM): aprueba por fit, rechaza anti-perfiles.

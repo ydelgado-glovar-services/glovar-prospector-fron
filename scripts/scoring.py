@@ -101,6 +101,19 @@ FIT_MIN_WITH_INTENT = 45
 # cuentas solo por conocimiento previo del modelo (anti-alucinación).
 FIT_MIN_NO_INTENT = 60
 
+# ── Penalización de TIMING (2026-08-25) ─────────────────────────────────────────
+# Decisión de negocio: el valor del producto es llegar en el MOMENTO EXACTO, no solo
+# listar empresas del sector. Antes, fit e intent eran ejes independientes (una cuenta
+# de alto fit sin trigger igual calificaba con la barra más alta FIT_MIN_NO_INTENT).
+# Ahora la falta de señal reciente además RECORTA el fit_score mismo (no solo exige
+# una barra más alta), aplicado en validator.py::_run_company_audit ANTES de decidir
+# calificación — así el timing pesa en el ranking real, no solo en un umbral binario.
+# 0.75 = recorte del 25%: una cuenta de fit excepcional (>=80) todavía puede sobrevivir
+# sin trigger (nurture real), pero un fit mediocre (60-75) ya no alcanza el umbral —
+# deliberadamente NO es 1.0 (ignoraría el caso "nurture" ya validado) ni <=0.5
+# (mataría el nurture por completo); ajustar aquí si el negocio decide otro balance.
+TIMING_PENALTY_NO_TRIGGER = 0.75
+
 
 def _clamp(value, lo: int = 0, hi: int = 100) -> int:
     try:

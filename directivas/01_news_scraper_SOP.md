@@ -9,7 +9,7 @@
 - **Objetivo Principal:** Extraer noticias altamente relevantes sobre la empresa objetivo utilizando la intención cognitiva generada en Fase 0 (`extracted_intent`) para construir 3 consultas multi-ángulo quirúrgicas, eliminando por completo la dependencia de diccionarios estáticos, clasificadores de keywords y reglas rígidas de triggers.
 - **Arquitectura de Búsqueda — Cognitive Query Planner:**
   1. **Pre-requisito: Manifiesto Cognitivo (Fase 0):** El script lee la clave `"extracted_intent"` del runtime context (`.tmp/active_runtime_context.json`), generada por el Pre-flight Intent Parser en `main.py`. Contiene: `target_industry_core`, `b2b_buying_trigger_context`, `rigorous_pain_framework`, `target_market_region`, `optimized_search_tokens`.
-  2. **Generador de Plan de Búsqueda Humana (`generate_human_search_plan`):** Invoca al LLM (`meta-llama/llama-4-scout-17b-16e-instruct`) para que actúe como un investigador humano y diseñe **3 consultas quirúrgicas y no-redundantes** basadas en el ICP (Ideal Customer Profile) del cliente:
+  2. **Generador de Plan de Búsqueda Humana (`generate_human_search_plan`):** Invoca al LLM (`GROQ_MODEL`, default `openai/gpt-oss-120b` — ver directivas/09) para que actúe como un investigador humano y diseñe **3 consultas quirúrgicas y no-redundantes** basadas en el ICP (Ideal Customer Profile) del cliente:
      - **EXPANSION** (Ángulo #1): Expansión física/corporativa, nuevas oficinas, contrataciones, inversiones en el mercado objetivo.
      - **PAIN_REGULATORY** (Ángulo #2): Fricción operativa, compliance, regulaciones, dolores sectoriales en el mercado objetivo.
      - **SOCIAL** (Ángulo #3): Relaciones públicas, eventos, webinars, conferencias, anuncios de ejecutivos en el mercado objetivo.

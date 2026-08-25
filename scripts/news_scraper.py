@@ -28,9 +28,8 @@ except Exception:
 
 load_dotenv()
 
-# ── AUDITORÍA #8: Modelo Groq configurable por entorno ──────────────────────────
-GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
-GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+# ── Modelo Groq único, configurable por entorno (ver directivas/09_lead_scoring_engine_SOP.md) ──
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 
 async def _tavily_search(api_key: str, query: str, max_results: int = 5, label: str = "search") -> list[dict]:
@@ -44,7 +43,9 @@ async def _tavily_search(api_key: str, query: str, max_results: int = 5, label: 
                     "query": query,
                     "search_depth": "basic",
                     "max_results": max_results,
-                    "time_range": "year"
+                    # Timing crítico (2026-08-25): antes "year" — se acota a "month" porque
+                    # el fit_score ahora se penaliza si no hay trigger reciente (ver scoring.py).
+                    "time_range": "month"
                 }
             )
             if response.status_code == 200:
@@ -124,14 +125,20 @@ async def generate_human_search_plan(company_name: str, extracted_intent: dict) 
         "Instead of writing one giant search query, you must generate exactly 3 distinct, "
         "highly targeted, non-redundant search queries optimized for search engines.\n\n"
         "CRITICAL RULES:\n"
-        "- Query 1 (Expansion): Focus on the company's regional expansion, new branches, hiring, "
-        "investments, or new local operations in the target market.\n"
-        "- Query 2 (Pain/Regulatory): Focus on the industry problems, compliance challenges, "
-        "or operational stressors they face in the target market.\n"
-        "- Query 3 (Social/PR): Focus on their local events, key executive announcements, "
-        "webinars, or conference participations in the target region.\n"
+        "- TIMING IS THE PRIORITY (2026-08-25 policy): we do NOT want static companies, we want companies "
+        "IN MOTION right now. Every query MUST be phrased to surface a genuine, recent BUYING TRIGGER — not "
+        "a generic company profile. Bias each query toward words like 'announces', 'recently', 'new', "
+        "'just opened', 'hiring', 'expanding' — not neutral/static company-description phrasing.\n"
+        "- Query 1 (Expansion Trigger): Focus on RECENT regional expansion, new branches, active hiring, "
+        "fresh investments, or newly opened local operations in the target market. Phrase it to find an "
+        "announcement, not a static fact (e.g. 'X announces new office' beats 'X offices in Y').\n"
+        "- Query 2 (Pain/Regulatory Trigger): Focus on RECENT industry problems, new compliance challenges, "
+        "or operational stressors they are currently facing in the target market — not evergreen sector facts.\n"
+        "- Query 3 (Social/PR Trigger): Focus on RECENT local events, fresh executive announcements, "
+        "or conference participations in the target region that signal current activity/momentum.\n"
         "- Each query MUST include the company name in double quotes.\n"
-        "- Do NOT use date strings like '2025' or '2026'. Keep them clean.\n"
+        "- Do NOT use literal date strings like '2025' or '2026' (over-narrows search engine matching). "
+        "Use relative recency words instead ('recent', 'latest', 'new', 'just').\n"
         "- Keep queries concise (under 120 characters each).\n\n"
         "You MUST respond with a strict JSON object matching this schema directly at the root level:\n"
         "{\n"
@@ -158,7 +165,7 @@ async def generate_human_search_plan(company_name: str, extracted_intent: dict) 
         time.sleep(2.0)  # Pacing delay
 
         response = client.chat.completions.create(
-            model=GROQ_MODEL_REASONING,
+            model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}

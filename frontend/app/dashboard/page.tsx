@@ -20,21 +20,26 @@ import type { ProspectRequest, ProspectResult, SavedQuery, JobProgress } from "@
 import { apiFetch } from "@/lib/api"
 import { useToast } from "@/hooks/use-toast"
 
+// ICP validado para Élite Logística y Rendimiento SAS — ver frontend/GUIA_USO.md
+// (Estrategia 1: Prospección Libre / Crecimiento). La app está dedicada exclusivamente
+// a este cliente, así que el formulario arranca pre-cargado en vez de vacío.
 const INITIAL_FORM: ProspectRequest = {
   prompt: "",
-  mi_empresa: "",
-  sector: "",
-  pais: "",
-  mercado_objetivo: "",
-  tamano_empresa: "",
-  cargo_decision: "",
-  dolor_cliente: "",
-  propuesta_valor: "",
-  limite_perfiles: 25,
+  mi_empresa: "Élite Logística y Rendimiento SAS",
+  sector: "Pharma, Medical Devices, CROs",
+  pais: "Estados Unidos",
+  mercado_objetivo: "Colombia",
+  tamano_empresa: "201-500",
+  cargo_decision: "VP Supply Chain LATAM, Director Logística Internacional, Clinical Operations Director",
+  dolor_cliente:
+    "Healthcare companies entering Colombia without a specialized local logistics partner risk cold chain failures, regulatory non-compliance (INVIMA), and delayed clinical trial operations.",
+  propuesta_valor:
+    "Único operador 3PL en Colombia 100% exclusivo del sector salud. 18 años de experiencia, certificaciones INVIMA (BPM/cadena de frío), entregas en <24 horas y equipo técnico químico-farmacéutico.",
+  limite_perfiles: 15,
   max_news_articles: 3,
-  triggers_compra: "",
+  triggers_compra: "ronda de inversion, expansion a Colombia, inicio de ensayo clinico",
   casos_exito: "",
-  keywords_industria: "",
+  keywords_industria: "cold chain compliance, clinical trials logistics, INVIMA approval",
   exclusion_list: [], // [Spec-Driven] Always present so FastAPI receives a valid list
 }
 
@@ -112,7 +117,7 @@ const executeProspectRequest = async (
 // Total budget: ~300 s (5 minutes) before the soft-timeout fires.
 const POLL_MIN_MS = 2_000   // 2 s  – initial interval
 const POLL_MAX_MS = 10_000  // 10 s – maximum interval
-const POLL_BUDGET_MS = 9000_000 // 5 min total
+const POLL_BUDGET_MS = 300_000 // 5 min total
 
 export default function DashboardPage() {
   const { session, isLoading: authLoading } = useAuth()

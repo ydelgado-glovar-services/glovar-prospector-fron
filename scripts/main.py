@@ -36,10 +36,8 @@ except Exception:
 
 load_dotenv()
 
-# ── AUDITORÍA #8: Modelo Groq configurable por entorno ──────────────────────────
-# Por defecto mantiene Llama-4-Scout para no alterar la calidad actual.
-GROQ_MODEL_REASONING = os.getenv("GROQ_MODEL_REASONING", "meta-llama/llama-4-scout-17b-16e-instruct")
-GROQ_MODEL_FAST = os.getenv("GROQ_MODEL_FAST", "meta-llama/llama-4-scout-17b-16e-instruct")
+# ── Modelo Groq único, configurable por entorno (ver directivas/09_lead_scoring_engine_SOP.md) ──
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 
 def get_next_groq_key(company_name: str = "") -> str:
@@ -147,7 +145,7 @@ def extract_strategic_intent(form_data: dict) -> dict:
         time.sleep(2.0)
         
         response = client.chat.completions.create(
-            model=GROQ_MODEL_REASONING,
+            model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -206,27 +204,40 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
         formatted_country.lower(), (country or "").strip().lower(), "", "global",
     )
 
-    # ── AUDITORÍA #4: Descubrimiento multi-ángulo ──────────────────────────────
+    # ── AUDITORÍA #4 + Signal-First (2026-08-25): Descubrimiento multi-ángulo ──────
+    # Antes las 3 queries eran "directorio" (listar empresas del sector) y el timing
+    # solo se validaba DESPUÉS, en news_scraper/validator — gastando Tavily+Apify en
+    # empresas que terminaban rechazadas por falta de señal reciente (medido en vivo:
+    # 2/2 empresas de una corrida real cayeron exactamente por esto). Ahora las 3
+    # queries de discovery ya exigen una señal de compra reciente en el propio texto
+    # de búsqueda ("anuncia", "contratando", "ronda de inversión"), no solo "listar
+    # empresas del sector" — para no pagarle a Tavily/Apify por cuentas estáticas.
+    # Híbrido deliberado: los ángulos 1-2 exigen señal reciente (filtro de fecha DURO
+    # vía Tavily time_range, no solo texto en la query). El ángulo 3 se deja SIN filtro
+    # de fecha como red de recall — si el nicho no tuvo noticias frescas ese mes, esto
+    # evita que discovery devuelva 0 empresas (feast-or-famine). El fit_score ya
+    # penaliza en validator.py/scoring.py a las que lleguen sin trigger reciente, así
+    # que dejar la puerta 3 abierta no relaja la calificación, solo evita el vacío.
     if is_expansion_play:
-        logger.info(f"Expansion-play discovery: HQ='{formatted_country}' expandiendo a '{expansion_market}'.")
+        logger.info(f"Expansion-play discovery (signal-first): HQ='{formatted_country}' expandiendo a '{expansion_market}'.")
         discovery_queries = [
-            # Ángulo 1: empresas (sede en HQ) que se EXPANDEN al mercado objetivo
-            f"{core_industry} companies headquartered in {formatted_country} expanding into {expansion_market} {cognitive_tokens}",
-            # Ángulo 2: empresas con OPERACIONES/sede en el mercado objetivo
-            f"{core_industry} companies with operations or offices in {expansion_market} {cognitive_tokens}",
-            # Ángulo 3: trigger de entrada/expansión al mercado objetivo
-            f"{core_industry} companies opening operations in {expansion_market} {extracted_intent.get('b2b_buying_trigger_context', '')}",
+            # Ángulo 1 (time_range=month): anuncio explícito de expansión/apertura reciente
+            (f"{core_industry} company announces expansion OR new office OR new facility in {expansion_market} 2026 {cognitive_tokens}", "month"),
+            # Ángulo 2 (time_range=month): ronda de inversión/financiamiento reciente ligada a crecimiento internacional
+            (f"{core_industry} company funding round OR Series A OR Series B OR Series C 2026 international expansion {cognitive_tokens}", "month"),
+            # Ángulo 3 (sin filtro de fecha): red de recall, contratación/operación en el mercado objetivo
+            (f"{core_industry} company hiring OR job openings in {expansion_market} {extracted_intent.get('b2b_buying_trigger_context', '')}", None),
         ]
     else:
         discovery_queries = [
-            # Ángulo 1: directorios / listados de empresas del nicho
-            f"list of active {core_industry} companies operating in {formatted_country} with {size} employees {cognitive_tokens}",
-            # Ángulo 2: líderes / mayores actores del sector (captura cuentas top)
-            f"largest and leading {core_industry} companies in {formatted_country} {cognitive_tokens}",
-            # Ángulo 3: orientado a la intención/dolor específico del ICP
-            f"{core_industry} companies {formatted_country} {cognitive_tokens} {extracted_intent.get('b2b_buying_trigger_context', '')}",
+            # Ángulo 1 (time_range=month): anuncios recientes de crecimiento/expansión
+            (f"{core_industry} company announces expansion OR growth OR new investment in {formatted_country} 2026 {cognitive_tokens}", "month"),
+            # Ángulo 2 (time_range=month): noticias recientes del sector con foco en movimiento
+            (f"{core_industry} companies news {formatted_country} hiring OR expanding OR funding {cognitive_tokens}", "month"),
+            # Ángulo 3 (sin filtro de fecha): red de recall orientada al dolor/intención del ICP
+            (f"{core_industry} companies {formatted_country} {cognitive_tokens} {extracted_intent.get('b2b_buying_trigger_context', '')}", None),
         ]
-    logger.info(f"Multi-angle company discovery ({len(discovery_queries)} queries) for '{core_industry}'.")
+    logger.info(f"Multi-angle SIGNAL-FIRST company discovery ({len(discovery_queries)} queries) for '{core_industry}'.")
 
     tavily_key: str = os.getenv("TAVILY_API_KEY", "")
     if not tavily_key:
@@ -237,11 +248,16 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
     snippets: list[str] = []
     try:
         with httpx.Client(timeout=20.0) as client:
-            for q in discovery_queries:
+            for q, time_range in discovery_queries:
                 try:
+                    search_payload = {"api_key": tavily_key, "query": q, "search_depth": "advanced", "max_results": 10}
+                    if time_range:
+                        # Tavily filtra server-side por fecha real, más confiable que
+                        # pedirle "reciente" solo en el texto de la query.
+                        search_payload["time_range"] = time_range
                     response = client.post(
                         "https://api.tavily.com/search",
-                        json={"api_key": tavily_key, "query": q, "search_depth": "advanced", "max_results": 10}
+                        json=search_payload
                     )
                     if response.status_code == 200:
                         results = response.json().get("results", [])
@@ -252,7 +268,11 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
                                 continue
                             if url:
                                 seen_urls.add(url)
-                            snippets.append(f"Title: {r.get('title')}\nContent: {r.get('content') or r.get('snippet')}")
+                            # Cap por snippet: search_depth="advanced" trae contenido largo;
+                            # sin truncar, agregar 3 queries x 10 resultados puede exceder el
+                            # límite de payload de Groq (413) — detectado en prueba de fuego 2026-08-25.
+                            content = (r.get('content') or r.get('snippet') or "")[:600]
+                            snippets.append(f"Title: {r.get('title')}\nContent: {content}")
                     else:
                         logger.error(f"Tavily discovery query failed with status {response.status_code}")
                 except Exception as inner:
@@ -262,7 +282,7 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
         logger.error(f"Error calling Tavily Search API: {e}")
         return []
 
-    raw_context = "\n\n".join(snippets)
+    raw_context = "\n\n".join(snippets)[:16000]  # tope duro adicional de seguridad
     if not raw_context:
         logger.error("No raw context retrieved from Tavily across all discovery angles.")
         return []
@@ -303,10 +323,13 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
     
     for attempt in range(max_retries):
         try:
-            api_key = get_next_groq_key(industry)
+            # Semilla por intento: un reintento tras 429 debe rotar a OTRA llave del
+            # pool, no volver a pedir la misma que acaba de rate-limitear.
+            key_seed = industry if attempt == 0 else f"{industry}::retry{attempt}"
+            api_key = get_next_groq_key(key_seed)
             groq_client = Groq(api_key=api_key)
             chat_completion = groq_client.chat.completions.create(
-                model=GROQ_MODEL_REASONING,
+                model=GROQ_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -323,6 +346,13 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
             extraction_response = chat_completion.choices[0].message.content
             break
         except Exception as e:
+            # 413/"too large" no es un rate limit real: reintentar con otra llave no lo
+            # arregla (el problema es el tamaño del payload, no la cuota). Detectado en
+            # prueba de fuego 2026-08-25 — el SDK de Groq incluye "rate_limit" en el
+            # mensaje incluso para errores de tamaño, así que se filtra aparte primero.
+            if "413" in str(e) or "too large" in str(e).lower():
+                logger.error(f"Payload too large for Groq (no reintentable, revisar tope de contexto): {e}")
+                break
             if "429" in str(e) or "rate_limit" in str(e) or "rate limit" in str(e).lower():
                 logger.warning(f"Groq Rate Limit hit. Retrying in {retry_delay}s... (Attempt {attempt+1}/{max_retries})")
                 time.sleep(retry_delay)
@@ -438,13 +468,30 @@ def main() -> None:
     from supabase import create_client, Client
     supabase_url = os.getenv("SUPABASE_URL", "")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    
+
     supabase_client = None
     if supabase_url and supabase_key:
         try:
             supabase_client = create_client(supabase_url, supabase_key)
         except Exception as e:
             logger.warning(f"Could not initialize Supabase client for idempotency check: {e}")
+
+    # ── Billetera de créditos (ver db/migrations/003_prospecting_credits.sql) ──
+    # Registro REAL (no estimado) de consumo: 1 crédito = 1 empresa efectivamente
+    # enviada al pipeline (discovery + news + auditoría), que es lo que gasta
+    # Tavily/Apify. El gate previo en app.py usa limite_perfiles como estimación
+    # de peor caso; esto deja el número exacto para contabilidad/reportes.
+    if supabase_client:
+        try:
+            supabase_client.table("prospecting_credits_usage").insert({
+                "user_id": args.user_id,
+                "job_id": args.job_id,
+                "mode": "deep",
+                "companies_processed": total_batch,
+                "credits_consumed": total_batch,
+            }).execute()
+        except Exception as e:
+            logger.warning(f"No se pudo registrar el consumo de créditos (¿migración 003 aplicada?): {e}")
 
     def process_company(company: str):
         nonlocal processed_count

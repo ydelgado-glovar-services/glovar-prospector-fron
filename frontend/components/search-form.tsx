@@ -414,6 +414,49 @@ export function SearchForm({ values, isLoading, isSessionReady = true, mode = "d
               </AccordionTrigger>
               <AccordionContent className="flex flex-col gap-5 pt-1 pb-4">
                 <div className="flex flex-col gap-2">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Estrategia de Prospección (ver GUIA_USO.md)
+                  </Label>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={isLoading}
+                      onClick={() =>
+                        handleFieldChange({
+                          dolor_cliente:
+                            "Healthcare companies entering Colombia without a specialized local logistics partner risk cold chain failures, regulatory non-compliance (INVIMA), and delayed clinical trial operations.",
+                          triggers_compra: "ronda de inversion, expansion a Colombia, inicio de ensayo clinico",
+                          keywords_industria: "cold chain compliance, clinical trials logistics, INVIMA approval",
+                        })
+                      }
+                    >
+                      Crecimiento (general)
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={isLoading}
+                      onClick={() =>
+                        handleFieldChange({
+                          dolor_cliente:
+                            "Pharma companies selecting local logistics providers risk INVIMA non-compliance, supply chain cold-chain excursions, and delayed trial operations due to poor RFP execution.",
+                          triggers_compra: "supplier RFP, licitacion proveedor logistico, vendor selection, notaeconomica.com.co",
+                          keywords_industria: "logistica farmaceutica Colombia, licitacion 3PL, notaeconomica",
+                        })
+                      }
+                    >
+                      Licitaciones / Medios
+                    </Button>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground mt-0.5">
+                    Cambia Dolor del Cliente, Triggers y Keywords a la plantilla correspondiente.
+                  </span>
+                </div>
+
+                <div className="flex flex-col gap-2">
                   <Label htmlFor="triggers_compra" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                     Triggers de Compra
                   </Label>

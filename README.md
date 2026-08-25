@@ -20,7 +20,7 @@
 > - **Determinismo:** `temperature=0.1` en toda la calificación (resultados reproducibles).
 > - **Descubrimiento ampliado:** 3 consultas Tavily multi-ángulo + el slider "Límite de perfiles" ahora controla el cap real de empresas.
 > - **Verificación de email:** se distingue email verificado (Apollo/Hunter) vs inferido por patrón (badge "Estimado").
-> - **Modelo Groq configurable:** `GROQ_MODEL_REASONING` / `GROQ_MODEL_FAST`.
+> - **Modelo Groq único configurable:** `GROQ_MODEL` (una sola variable para todo el pipeline; ver `directivas/09_lead_scoring_engine_SOP.md`).
 > - **Migración DB:** `db/migrations/002_lead_scoring_and_email_verification.sql`.
 
 > **Changelog 3.11.0**
@@ -63,7 +63,7 @@ El sistema está construido bajo una filosofía **decapitada (headless), serverl
  │  - scripts/main.py (Orquestador Central)               │ │  (Servidor Backend      │
  │  - scripts/news_scraper.py (Cognitive Search Planner)  │ │  Autónomo de 2GB RAM    │
  │  - scripts/lead_scraper.py (Apify + Hunter.io API)    │ │   y autoescalable)      │
- │  - scripts/validator.py (RAG & Llama-4-Scout Audit)    │ └─────────────┬───────────┘
+ │  - scripts/validator.py (RAG & LLM Audit)              │ └─────────────┬───────────┘
  └───────────────────────────┬────────────────────────────┘               │
                              │ (Secure SSL Client / RLS Active)           │
                              ▼                                            │
@@ -80,7 +80,7 @@ El sistema está construido bajo una filosofía **decapitada (headless), serverl
 2. **Backend**: FastAPI `0.115` + Uvicorn. Administra la autenticación del usuario, persistencia de consultas, y expone los webhooks de telemetría interna.
 3. **Container Serverless (Modal)**: Modal (`modal_app.py`) empaqueta y despliega la aplicación de FastAPI a la nube serverless de Modal con autoescalado horizontal (hasta 10 contenedores concurrentes), límites de tiempo de ejecución de 15 minutos (`timeout=900`) y asignación de 2GB de RAM para evitar cuellos de botella durante las corridas de concurrencia.
 4. **Data Cluster**: Cloud Supabase (PostgreSQL 17.6) provisto de políticas RLS estrictas y esquemas relacionales robustos.
-5. **Modelos de Inferencia**: Rotador determinista de claves de API de Groq en base al hash de la empresa para consumir de forma segura **Llama 4 Scout** (`meta-llama/llama-4-scout-17b-16e-instruct`), garantizando consistencia, velocidad lógica y cero "frío" inicial.
+5. **Modelos de Inferencia**: Rotador determinista de claves de API de Groq en base al hash de la empresa para consumir de forma segura el modelo configurado en `GROQ_MODEL` (default `openai/gpt-oss-120b`), garantizando consistencia, velocidad lógica y cero "frío" inicial.
 
 ---
 
@@ -189,7 +189,7 @@ Es el punto de entrada de la ejecución asíncrona. Maneja la orquestación sem�
     *   `--user_id`: UUID del cliente.
     *   `--job_id`: UUID único del job creado.
 *   **Proceso Interno:**
-    1.  **Fase 0: Pre-flight Cognitive Intent Parser:** Lee los campos crudos del formulario y ejecuta a `Llama 4 Scout` para extraer un manifiesto cognitivo de alta precisión:
+    1.  **Fase 0: Pre-flight Cognitive Intent Parser:** Lee los campos crudos del formulario y ejecuta al LLM configurado en `GROQ_MODEL` para extraer un manifiesto cognitivo de alta precisión:
         *   `optimized_search_tokens`: Los 4 mejores términos en inglés/español para búsquedas orgánicas.
         *   `target_industry_core`: Nicho normalizado en inglés.
         *   `b2b_buying_trigger_context`: Traducciòn explícita del detonante del dolor de compra.
@@ -220,7 +220,7 @@ Localiza hitos de crecimiento recientes y críticos (2025/2026) que justifiquen 
         *   *Query Regulatoria/Dolor:* Enfoque en normativas locales (ej. INVIMA BPM) y retos de suministro.
         *   *Query Social/Comercial:* Enfocado en hitos o disrupciones de mercado.
     2.  **Scraping y Extracción Avanzada:** Dispara las búsquedas mediante `Tavily Search API`. Toma los 3 mejores enlaces de noticias y realiza un raspado profundo mediante `Tavily Extract API` para digerir el contenido HTML crudo a texto limpio.
-    3.  **Filtrado Semántico de Noticias por IA:** Evalúa el texto consolidado mediante Llama 4 Scout. Asigna un score de relevancia basado en si la noticia refleja un trigger válido 2025/2026 alineado al mercado del cliente y descarta contenido genérico (blogs, comunicados vagos).
+    3.  **Filtrado Semántico de Noticias por IA:** Evalúa el texto consolidado mediante el LLM configurado en `GROQ_MODEL`. Asigna un score de relevancia basado en si la noticia refleja un trigger válido 2025/2026 alineado al mercado del cliente y descarta contenido genérico (blogs, comunicados vagos).
 *   **Salidas:**
     *   Escribe `.tmp/news_{company}.json` conteniendo el trigger seleccionado, la noticia líder y su URL origen. Si no se hallan noticias válidas, marca el archivo con un trigger nulo para su descalificación en cascada.
 
@@ -252,7 +252,7 @@ Lleva a cabo la auditoría cruzada conceptual definitiva y redacta los correos d
     *   UUID del usuario y UUID del Job.
     *   Archivos temporales `.tmp/job_{job_id}/news_{company}.json` y `.tmp/job_{job_id}/leads_{company}.json`.
 *   **Proceso Interno:**
-    1.  **Fase 2: Rigorous Pain Framework Integration:** Toma el manifiesto de dolor del runtime context y lo inserta en el prompt de Llama 4 Scout.
+    1.  **Fase 2: Rigorous Pain Framework Integration:** Toma el manifiesto de dolor del runtime context y lo inserta en el prompt del LLM configurado en `GROQ_MODEL`.
     2.  **Cortocircuito de Inferencia:** Si el lead viene marcado como pre-descalificado (por rol inválido o mismatch en `lead_scraper`), escribe directamente en Supabase con `es_calificado = false` en milisegundos, eludiendo la llamada del LLM por completo.
     3.  **Auditoría de Inferencia Cruzada:** Si el lead es apto, el LLM audita la cuenta bajo 3 pilares lógicos:
         *   *Punto 1 (Hecho Noticioso Detonante):* Fáctico, verídico y temporalmente acotado (2025/2026).

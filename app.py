@@ -29,7 +29,10 @@ api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
     expected_key = os.getenv("GLOVAR_BACKEND_API_KEY")
     if not expected_key:
-        return
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server configuration error: Backend API Key is not set."
+        )
     if not api_key or api_key != expected_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -147,10 +150,71 @@ def execute_pipeline_subprocess(payload_path: str, user_id: str, job_id: str):
         except Exception as err:
             print(f"[Orchestrator] Failed to update failed status: {err}")
 
+@app.get("/health")
+async def health_check():
+    """Chequeo de salud liviano para monitoreo externo (mismo x-api-key que el resto de la API).
+
+    No toca Supabase ni ninguna dependencia externa: si esto responde, el contenedor
+    arrancó y el proceso ASGI está vivo. Úsalo con un cron/UptimeRobot para detectar
+    un crash-loop en minutos en vez de descubrirlo por accidente (incidente 2026-08-24).
+    """
+    return {"status": "ok", "service": "ai-lead-prospector-backend"}
+
+
+DEFAULT_MONTHLY_CREDIT_LIMIT = 300  # ver db/migrations/003_prospecting_credits.sql y directivas/11
+
+
+def _check_credit_balance(user_id: str, estimated_cost: int) -> None:
+    """Billetera de créditos de prospección (Modo Profundo): 1 crédito = 1 empresa
+    procesada. Bloquea con 402 si el saldo del mes no alcanza para el peor caso
+    de esta corrida (limite_perfiles). Es un gate FUNCIONAL para contabilizar y
+    no reventar la cuota de Tavily/Apify — no hay UI de bloqueo en el frontend
+    todavía (fuera de alcance actual, ver directivas/11)."""
+    try:
+        used_result = supabase.rpc("get_monthly_credits_used", {"p_user_id": user_id}).execute()
+        used = used_result.data if isinstance(used_result.data, int) else 0
+    except Exception as e:
+        # Fail-open deliberado: si la tabla/función de créditos no existe todavía
+        # (migración 003 no corrida) o Supabase falla, no se bloquea la prospección
+        # por un problema de contabilidad — solo se loggea.
+        print(f"[Credits] No se pudo verificar el saldo (¿migración 003 aplicada?): {e}")
+        return
+
+    try:
+        limit_result = (
+            supabase.table("prospecting_credit_limits")
+            .select("monthly_credit_limit")
+            .eq("user_id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        monthly_limit = (
+            limit_result.data["monthly_credit_limit"]
+            if limit_result.data else DEFAULT_MONTHLY_CREDIT_LIMIT
+        )
+    except Exception:
+        monthly_limit = DEFAULT_MONTHLY_CREDIT_LIMIT
+
+    if used + estimated_cost > monthly_limit:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Saldo de créditos de prospección insuficiente para este mes. "
+                f"Usados: {used}/{monthly_limit}. Esta corrida podría consumir hasta "
+                f"{estimated_cost} créditos (1 por empresa a procesar). "
+                f"Reduce 'Límite de perfiles a analizar' o espera al próximo mes."
+            ),
+        )
+
+
 @app.post("/api/v1/prospect", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_prospecting_flow(payload: ProspectRequest, background_tasks: BackgroundTasks, x_user_id: str = Header(...)):
     job_id = str(uuid.uuid4())
-    
+
+    # Gate de créditos ANTES de gastar Tavily/Apify: usa limite_perfiles (el tope
+    # que el propio usuario pidió) como estimación de peor caso.
+    await run_in_threadpool(_check_credit_balance, x_user_id, payload.limite_perfiles or 10)
+
     try:
         supabase.table("jobs_status").insert({
             "job_id": job_id,
