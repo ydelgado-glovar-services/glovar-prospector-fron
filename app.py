@@ -164,44 +164,46 @@ async def health_check():
 DEFAULT_MONTHLY_CREDIT_LIMIT = 300  # ver db/migrations/003_prospecting_credits.sql y directivas/11
 
 
-def _check_credit_balance(user_id: str, estimated_cost: int) -> None:
+def _reserve_credits(user_id: str, job_id: str, estimated_cost: int) -> None:
     """Billetera de créditos de prospección (Modo Profundo): 1 crédito = 1 empresa
     procesada. Bloquea con 402 si el saldo del mes no alcanza para el peor caso
-    de esta corrida (limite_perfiles). Es un gate FUNCIONAL para contabilizar y
-    no reventar la cuota de Tavily/Apify — no hay UI de bloqueo en el frontend
-    todavía (fuera de alcance actual, ver directivas/11)."""
+    de esta corrida (limite_perfiles).
+
+    Check-and-reserve ATÓMICO vía RPC (Postgres, advisory lock por usuario):
+    corrige un TOCTOU real — antes se leía el saldo aquí y el consumo se
+    registraba mucho después en scripts/main.py (subproceso separado), así que
+    dos peticiones concurrentes de la cuenta compartida (4 usuarios de Élite)
+    podían leer el mismo saldo y ambas pasar. Ver db/migrations/003, función
+    `reserve_prospecting_credits`. `scripts/main.py` hace UPDATE de esta
+    reserva con el conteo real de empresas procesadas (no un INSERT nuevo)."""
     try:
-        used_result = supabase.rpc("get_monthly_credits_used", {"p_user_id": user_id}).execute()
-        used = used_result.data if isinstance(used_result.data, int) else 0
+        result = supabase.rpc(
+            "reserve_prospecting_credits",
+            {"p_user_id": user_id, "p_job_id": job_id, "p_estimated_cost": estimated_cost},
+        ).execute()
+        row = result.data[0] if result.data else None
     except Exception as e:
-        # Fail-open deliberado: si la tabla/función de créditos no existe todavía
-        # (migración 003 no corrida) o Supabase falla, no se bloquea la prospección
-        # por un problema de contabilidad — solo se loggea.
-        print(f"[Credits] No se pudo verificar el saldo (¿migración 003 aplicada?): {e}")
+        # Fail-open ACEPTADO Y DOCUMENTADO (no un descuido): el control de
+        # créditos es un límite de costo interno de bajo riesgo (unos pocos
+        # dólares de Tavily/Apify en el peor caso), no un límite de seguridad.
+        # Bloquear la prospección real por un problema transitorio de Supabase
+        # sería peor para el negocio que dejar pasar una corrida sin contar.
+        # Log a nivel ERROR (visible en `modal app logs`) para que el drift sea
+        # detectable, no silencioso — antes era un print() fácil de perder.
+        print(f"[Credits][ERROR] Fail-open: no se pudo reservar saldo (¿migración 003 aplicada?): {e}")
         return
 
-    try:
-        limit_result = (
-            supabase.table("prospecting_credit_limits")
-            .select("monthly_credit_limit")
-            .eq("user_id", user_id)
-            .maybe_single()
-            .execute()
-        )
-        monthly_limit = (
-            limit_result.data["monthly_credit_limit"]
-            if limit_result.data else DEFAULT_MONTHLY_CREDIT_LIMIT
-        )
-    except Exception:
-        monthly_limit = DEFAULT_MONTHLY_CREDIT_LIMIT
+    if not row:
+        print("[Credits][ERROR] Fail-open: RPC reserve_prospecting_credits no devolvió fila.")
+        return
 
-    if used + estimated_cost > monthly_limit:
+    if not row.get("allowed", True):
         raise HTTPException(
             status_code=402,
             detail=(
                 f"Saldo de créditos de prospección insuficiente para este mes. "
-                f"Usados: {used}/{monthly_limit}. Esta corrida podría consumir hasta "
-                f"{estimated_cost} créditos (1 por empresa a procesar). "
+                f"Usados: {row.get('credits_used')}/{row.get('credits_limit')}. Esta corrida podría "
+                f"consumir hasta {estimated_cost} créditos (1 por empresa a procesar). "
                 f"Reduce 'Límite de perfiles a analizar' o espera al próximo mes."
             ),
         )
@@ -212,8 +214,9 @@ async def trigger_prospecting_flow(payload: ProspectRequest, background_tasks: B
     job_id = str(uuid.uuid4())
 
     # Gate de créditos ANTES de gastar Tavily/Apify: usa limite_perfiles (el tope
-    # que el propio usuario pidió) como estimación de peor caso.
-    await run_in_threadpool(_check_credit_balance, x_user_id, payload.limite_perfiles or 10)
+    # que el propio usuario pidió) como estimación de peor caso. Atómico (ver
+    # _reserve_credits) — reserva bajo el mismo job_id que ya se generó arriba.
+    await run_in_threadpool(_reserve_credits, x_user_id, job_id, payload.limite_perfiles or 10)
 
     try:
         supabase.table("jobs_status").insert({

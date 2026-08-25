@@ -447,24 +447,6 @@ def main() -> None:
         json.dump(enriched_context, f, indent=2, ensure_ascii=False)
     logger.info(f"Runtime context (job-isolated) written for job_id={args.job_id}.")
 
-    country: str = form_data.get("pais") or "Colombia"
-    discovered_companies: list[str] = discover_companies(industry, size, country, extracted_intent, limit=limite_perfiles)
-    if not discovered_companies:
-        logger.info("No companies discovered. Pipeline halting gracefully.")
-        sys.exit(0)
-        
-    exclusion_list: list[str] = [name.strip().lower() for name in form_data.get("exclusion_list", [])]
-    clean_companies: list[str] = [c for c in discovered_companies if c.strip().lower() not in exclusion_list][:limite_perfiles]  # Cap dinámico = límite de perfiles solicitado por el usuario (5–25)
-    
-    if not clean_companies:
-        logger.info("All targets matched blacklist exclusion array parameters. Exiting.")
-        sys.exit(0)
-        
-    total_batch: int = len(clean_companies)
-    processed_count = 0
-    import threading
-    lock = threading.Lock()
-
     from supabase import create_client, Client
     supabase_url = os.getenv("SUPABASE_URL", "")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -476,22 +458,47 @@ def main() -> None:
         except Exception as e:
             logger.warning(f"Could not initialize Supabase client for idempotency check: {e}")
 
-    # ── Billetera de créditos (ver db/migrations/003_prospecting_credits.sql) ──
-    # Registro REAL (no estimado) de consumo: 1 crédito = 1 empresa efectivamente
-    # enviada al pipeline (discovery + news + auditoría), que es lo que gasta
-    # Tavily/Apify. El gate previo en app.py usa limite_perfiles como estimación
-    # de peor caso; esto deja el número exacto para contabilidad/reportes.
-    if supabase_client:
+    def _settle_credits_reservation(companies_processed: int) -> None:
+        """Ajusta la reserva de créditos (creada atómicamente por app.py vía
+        reserve_prospecting_credits) al conteo REAL de empresas. Es un UPDATE
+        sobre la fila reservada por job_id, NUNCA un INSERT nuevo — evitar
+        duplicar el gasto ya reservado. Se llama tanto en las salidas
+        tempranas (0 empresas) como al final del descubrimiento."""
+        if not supabase_client:
+            return
         try:
-            supabase_client.table("prospecting_credits_usage").insert({
-                "user_id": args.user_id,
-                "job_id": args.job_id,
-                "mode": "deep",
-                "companies_processed": total_batch,
-                "credits_consumed": total_batch,
-            }).execute()
+            supabase_client.table("prospecting_credits_usage").update({
+                "companies_processed": companies_processed,
+                "credits_consumed": companies_processed,
+            }).eq("job_id", args.job_id).execute()
         except Exception as e:
-            logger.warning(f"No se pudo registrar el consumo de créditos (¿migración 003 aplicada?): {e}")
+            logger.warning(f"No se pudo ajustar la reserva de créditos (¿migración 003 aplicada?): {e}")
+
+    country: str = form_data.get("pais") or "Colombia"
+    discovered_companies: list[str] = discover_companies(industry, size, country, extracted_intent, limit=limite_perfiles)
+    if not discovered_companies:
+        logger.info("No companies discovered. Pipeline halting gracefully.")
+        _settle_credits_reservation(0)  # libera la reserva: no se gastó nada real
+        sys.exit(0)
+
+    exclusion_list: list[str] = [name.strip().lower() for name in form_data.get("exclusion_list", [])]
+    clean_companies: list[str] = [c for c in discovered_companies if c.strip().lower() not in exclusion_list][:limite_perfiles]  # Cap dinámico = límite de perfiles solicitado por el usuario (5–25)
+
+    if not clean_companies:
+        logger.info("All targets matched blacklist exclusion array parameters. Exiting.")
+        _settle_credits_reservation(0)  # libera la reserva: no se gastó nada real
+        sys.exit(0)
+
+    total_batch: int = len(clean_companies)
+    processed_count = 0
+    import threading
+    lock = threading.Lock()
+
+    # ── Billetera de créditos (ver db/migrations/003_prospecting_credits.sql) ──
+    # Ajusta la reserva atómica (creada en app.py) al conteo REAL de empresas
+    # que sí van a procesarse — normalmente ≤ el estimado (limite_perfiles) que
+    # se usó para reservar, nunca mayor (clean_companies ya está capado).
+    _settle_credits_reservation(total_batch)
 
     def process_company(company: str):
         nonlocal processed_count
