@@ -121,6 +121,12 @@ def extract_strategic_intent(form_data: dict) -> dict:
         "CRITICAL RULE: The Anti-Profile MUST NEVER include the target industry. If the target industry is Banks and Insurance, "
         "DO NOT exclude banks. The Anti-Profile is STRICTLY for direct competitors of the sending company "
         "(e.g. other IT consultants, RPA agencies), not the target clients. "
+        "8. 'dynamic_tavily_queries': An array of EXACTLY 3 highly optimized search strings for Tavily web search. "
+        "CRITICAL: Do NOT use generic terms like 'funding round' if the user provides specific 'Triggers de Compra' or 'Keywords de Industria' (e.g., 'licitacion proveedor logistico', 'INVIMA approval', 'supplier RFP'). Use the user's exact triggers. "
+        "Angle 1: Focus on the target company's expansion, regulatory approvals (e.g. INVIMA), or new projects in the target market. "
+        "Angle 2: Focus on public/private tenders (licitaciones, RFPs) or the specific buying triggers provided. "
+        "Angle 3: Focus on operational scaling (hiring, new facilities, supply chain needs) in the target market. "
+        "Ensure each query includes the target industry and the relevant geographic market.\n"
         f"Before finalizing, verify that 'anti_profile_constraints' does NOT exclude the target industry ('{form_data.get('sector', '')}'); "
         "if it does, remove that exclusion. When no clear competitor profile exists, return an empty string."
     )
@@ -204,40 +210,77 @@ def discover_companies(industry: str, size: str, country: str, extracted_intent:
         formatted_country.lower(), (country or "").strip().lower(), "", "global",
     )
 
-    # ── AUDITORÍA #4 + Signal-First (2026-08-25): Descubrimiento multi-ángulo ──────
-    # Antes las 3 queries eran "directorio" (listar empresas del sector) y el timing
-    # solo se validaba DESPUÉS, en news_scraper/validator — gastando Tavily+Apify en
-    # empresas que terminaban rechazadas por falta de señal reciente (medido en vivo:
-    # 2/2 empresas de una corrida real cayeron exactamente por esto). Ahora las 3
-    # queries de discovery ya exigen una señal de compra reciente en el propio texto
-    # de búsqueda ("anuncia", "contratando", "ronda de inversión"), no solo "listar
-    # empresas del sector" — para no pagarle a Tavily/Apify por cuentas estáticas.
-    # Híbrido deliberado: los ángulos 1-2 exigen señal reciente (filtro de fecha DURO
-    # vía Tavily time_range, no solo texto en la query). El ángulo 3 se deja SIN filtro
-    # de fecha como red de recall — si el nicho no tuvo noticias frescas ese mes, esto
-    # evita que discovery devuelva 0 empresas (feast-or-famine). El fit_score ya
-    # penaliza en validator.py/scoring.py a las que lleguen sin trigger reciente, así
-    # que dejar la puerta 3 abierta no relaja la calificación, solo evita el vacío.
-    if is_expansion_play:
-        logger.info(f"Expansion-play discovery (signal-first): HQ='{formatted_country}' expandiendo a '{expansion_market}'.")
-        discovery_queries = [
-            # Ángulo 1 (time_range=month): anuncio explícito de expansión/apertura reciente
-            (f"{core_industry} company announces expansion OR new office OR new facility in {expansion_market} 2026 {cognitive_tokens}", "month"),
-            # Ángulo 2 (time_range=month): ronda de inversión/financiamiento reciente ligada a crecimiento internacional
-            (f"{core_industry} company funding round OR Series A OR Series B OR Series C 2026 international expansion {cognitive_tokens}", "month"),
-            # Ángulo 3 (sin filtro de fecha): red de recall, contratación/operación en el mercado objetivo
-            (f"{core_industry} company hiring OR job openings in {expansion_market} {extracted_intent.get('b2b_buying_trigger_context', '')}", None),
-        ]
+    # ── FASE 0 Dynamic Queries (2026-08-25) ─────────────────────────────────────
+    # Phase 0 (extract_strategic_intent) now produces 'dynamic_tavily_queries':
+    # 3 custom search strings built from the user's exact triggers (licitaciones,
+    # INVIMA approvals, RFPs, supplier selection, etc.). If present, we use them
+    # directly — they are far more precise than the generic hardcoded templates.
+    # The fallback (generic signal-first queries) only runs when Phase 0 didn't
+    # produce them (e.g. model returned malformed JSON or field is missing).
+    dynamic_queries_raw: list = extracted_intent.get("dynamic_tavily_queries", [])
+    dynamic_queries_raw = [q for q in dynamic_queries_raw if isinstance(q, str) and q.strip()]
+
+    if dynamic_queries_raw:
+        logger.info(
+            f"Using {len(dynamic_queries_raw)} DYNAMIC queries from Phase 0 "
+            f"(licitaciones/triggers-aware) for '{core_industry}'."
+        )
+        # Ángulos 1 y 2 con time_range=month (señal reciente exigida).
+        # Ángulo 3 sin filtro de fecha como red de recall (evita feast-or-famine).
+        discovery_queries = []
+        for idx, q in enumerate(dynamic_queries_raw[:3]):
+            time_range = "month" if idx < 2 else None
+            discovery_queries.append((q, time_range))
     else:
-        discovery_queries = [
-            # Ángulo 1 (time_range=month): anuncios recientes de crecimiento/expansión
-            (f"{core_industry} company announces expansion OR growth OR new investment in {formatted_country} 2026 {cognitive_tokens}", "month"),
-            # Ángulo 2 (time_range=month): noticias recientes del sector con foco en movimiento
-            (f"{core_industry} companies news {formatted_country} hiring OR expanding OR funding {cognitive_tokens}", "month"),
-            # Ángulo 3 (sin filtro de fecha): red de recall orientada al dolor/intención del ICP
-            (f"{core_industry} companies {formatted_country} {cognitive_tokens} {extracted_intent.get('b2b_buying_trigger_context', '')}", None),
-        ]
-    logger.info(f"Multi-angle SIGNAL-FIRST company discovery ({len(discovery_queries)} queries) for '{core_industry}'.")
+        # ── Fallback: Signal-First hardcoded (conservado de AUDITORÍA #4) ──────
+        logger.warning(
+            "Phase 0 did not return dynamic_tavily_queries. "
+            "Falling back to generic signal-first templates."
+        )
+        if is_expansion_play:
+            logger.info(
+                f"Expansion-play discovery (signal-first): "
+                f"HQ='{formatted_country}' expandiendo a '{expansion_market}'."
+            )
+            discovery_queries = [
+                (
+                    f"{core_industry} company announces expansion OR new office "
+                    f"OR new facility in {expansion_market} 2026 {cognitive_tokens}",
+                    "month",
+                ),
+                (
+                    f"{core_industry} company funding round OR Series A OR Series B "
+                    f"OR Series C 2026 international expansion {cognitive_tokens}",
+                    "month",
+                ),
+                (
+                    f"{core_industry} company hiring OR job openings in "
+                    f"{expansion_market} {extracted_intent.get('b2b_buying_trigger_context', '')}",
+                    None,
+                ),
+            ]
+        else:
+            discovery_queries = [
+                (
+                    f"{core_industry} company announces expansion OR growth OR new investment "
+                    f"in {formatted_country} 2026 {cognitive_tokens}",
+                    "month",
+                ),
+                (
+                    f"{core_industry} companies news {formatted_country} "
+                    f"hiring OR expanding OR funding {cognitive_tokens}",
+                    "month",
+                ),
+                (
+                    f"{core_industry} companies {formatted_country} {cognitive_tokens} "
+                    f"{extracted_intent.get('b2b_buying_trigger_context', '')}",
+                    None,
+                ),
+            ]
+    logger.info(
+        f"Discovery queries resolved ({len(discovery_queries)} angles) "
+        f"for '{core_industry}'."
+    )
 
     tavily_key: str = os.getenv("TAVILY_API_KEY", "")
     if not tavily_key:
